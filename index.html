@@ -5,15 +5,19 @@
   <title>Traffic Simulation Logger</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 20px; }
+    /* Adjust this height to control how tall the model area is */
     iframe { border: 1px solid #ccc; width: 100%; height: 460px; }
     button { margin: 10px 5px; padding: 10px 15px; }
-    #output { white-space: pre-line; margin-top: 20px; }
     #controls {
       margin-top: 10px;
       padding: 10px;
       background: #f9f9f9;
       border: 1px solid #ddd;
-      display: inline-block;   /* keeps the box snug */
+      display: inline-block;   /* keeps the box snug around buttons */
+    }
+    #output {
+      white-space: pre-line;
+      margin-top: 10px;
     }
   </style>
 </head>
@@ -30,8 +34,6 @@
     <button id="dl-run">Download Run CSV</button>
     <div id="output"></div>
   </div>
-
-  <div id="output"></div>
 
   <script>
     // JS code will go here later (for queries + posting to Apps Script)
