@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Traffic Simulation Logger</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    iframe { border: 1px solid #ccc; width: 100%; height: 600px; }
+    button { margin: 10px 5px; padding: 10px 15px; }
+    #output { white-space: pre-line; margin-top: 20px; }
+  </style>
+</head>
+<body>
+  <h1>Traffic Simulation Logger</h1>
+
+  <!-- The NetLogo Web model runs inside this iframe -->
+  <iframe id="nlw" 
+    src="https://www.netlogoweb.org/assets/model?model=YOUR_MODEL.nlogo&relayIframeEvents=model-load,session-loop-started"
+  ></iframe>
+
+  <div>
+    <button id="dl-init">Download Init CSV</button>
+    <button id="dl-run">Download Run CSV</button>
+  </div>
+
+  <div id="output"></div>
+
+  <script>
+    // JS code will go here later (for queries + posting to Apps Script)
+    document.getElementById("output").textContent =
+      "Wrapper page loaded.\nModel is running inside the iframe above.";
+  </script>
+</body>
+</html>
