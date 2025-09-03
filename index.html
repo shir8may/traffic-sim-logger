@@ -3,42 +3,255 @@
 <head>
   <meta charset="UTF-8" />
   <title>Traffic Simulation Logger</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
+    :root{
+      --box:#f9f9f9; --line:#ddd; --muted:#555; --ok:#0a7; --err:#b00;
+    }
     body { font-family: Arial, sans-serif; margin: 20px; }
-    /* Adjust this height to control how tall the model area is */
     iframe { border: 1px solid #ccc; width: 100%; height: 460px; }
-    button { margin: 10px 5px; padding: 10px 15px; }
     #controls {
-      margin-top: 10px;
-      padding: 10px;
-      background: #f9f9f9;
-      border: 1px solid #ddd;
-      display: inline-block;   /* keeps the box snug around buttons */
+      margin-top: 10px; padding: 10px; background: var(--box);
+      border: 1px solid var(--line); display: grid; gap: 8px;
+      grid-template-columns: 1fr auto auto; align-items: center;
     }
-    #output {
-      white-space: pre-line;
-      margin-top: 10px;
-    }
+    .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+    button { margin: 0; padding: 10px 14px; cursor: pointer; }
+    select, input[type="text"] { padding: 8px; }
+    #output { white-space: pre-line; margin-top: 10px; }
+    .muted { color: var(--muted); }
+    .ok { color: var(--ok); }
+    .err { color: var(--err); }
+    .logline { margin: 0.2em 0; }
+    .links a { display:block; }
+    .tiny { font-size: 12px; }
   </style>
 </head>
 <body>
   <h1>Traffic Simulation Logger</h1>
 
-  <!-- The NetLogo Web model runs inside this iframe -->
-  <iframe id="nlw" 
+  <!-- NetLogo Web model in an iframe -->
+  <iframe id="nlw"
     src="https://www.netlogoweb.org/launch#https://www.netlogoweb.org/assets/modelslib/Sample%20Models/Biology/Wolf%20Sheep%20Predation.nlogo"
+    referrerpolicy="no-referrer"
   ></iframe>
 
   <div id="controls">
-    <button id="dl-init">Download Init CSV</button>
-    <button id="dl-run">Download Run CSV</button>
-    <div id="output"></div>
+    <div class="row">
+      <label class="muted">Mode:</label>
+      <select id="mode">
+        <option value="drive" selected>Upload to Drive (Apps Script)</option>
+        <option value="local">Download locally</option>
+      </select>
+      <span class="tiny muted">After a successful <b>Run</b> upload, the model buffer will be cleared.</span>
+    </div>
+
+    <div class="row">
+      <button id="btn-init">Download Init CSV</button>
+      <button id="btn-run">Download Run CSV</button>
+    </div>
+
+    <!-- Optional: override file base (kept simple) -->
+    <div class="row">
+      <label class="muted" for="filebase">File base:</label>
+      <input id="filebase" type="text" value="logger" size="14" />
+    </div>
   </div>
 
+  <div id="output" class="muted">Wrapper page loaded. Waiting for the model…</div>
+
   <script>
-    // JS code will go here later (for queries + posting to Apps Script)
-    document.getElementById("output").textContent =
-      "Wrapper page loaded.\nModel is running inside the iframe above.";
+    /***********************
+     * 🔧 SET THIS ONCE:
+     ***********************/
+    const APPS_SCRIPT_URL =
+      "https://script.google.com/macros/s/AKfycby8icKZjsdXeHmxIprEKsfjPq3rcWcVvDRt8Vib41DB1EbqBt5FpGqkeuSA5PGQvIZ9/exec";
+    // ↑ Replace if you redeploy. Leave as-is to use the URL you sent me.
+
+    /******************************************************************
+     * NetLogo Web messaging helper
+     * - We send requests to the iframe using window.postMessage.
+     * - The iframe (NetLogo Web) responds with results or errors.
+     * This uses a compact request/response pattern with requestId.
+     ******************************************************************/
+    const nlwFrame = document.getElementById("nlw");
+    const NLW_ORIGIN = "https://www.netlogoweb.org";
+
+    let requestSeq = 0;
+    const pending = new Map(); // id -> {resolve,reject,timeout}
+
+    window.addEventListener("message", (event) => {
+      if (event.origin !== NLW_ORIGIN) return;
+      const data = event.data || {};
+      // Accept two generic shapes:
+      // { nlw: "ok"|"error", requestId, result?, error? }
+      // or { type: "nlw:ok"|"nlw:error", id, value?, message? }
+      let id, isOk, value, message;
+      if (data && typeof data === "object") {
+        if ("nlw" in data) {
+          id = data.requestId; isOk = data.nlw === "ok";
+          value = data.result; message = data.error;
+        } else if ("type" in data) {
+          id = data.id; isOk = data.type === "nlw:ok";
+          value = data.value; message = data.message;
+        } else {
+          return; // not ours
+        }
+      }
+      if (!pending.has(id)) return;
+      const { resolve, reject, timeout } = pending.get(id);
+      clearTimeout(timeout);
+      pending.delete(id);
+      isOk ? resolve(value) : reject(new Error(message || "Unknown NLW error"));
+    });
+
+    function postToNLW(payload) {
+      return new Promise((resolve, reject) => {
+        const requestId = "req-" + (++requestSeq);
+        const msg = { ...payload, requestId };
+        const timeout = setTimeout(() => {
+          pending.delete(requestId);
+          reject(new Error("Timed out waiting for NetLogo Web response."));
+        }, 15000);
+        pending.set(requestId, { resolve, reject, timeout });
+        nlwFrame.contentWindow.postMessage(msg, NLW_ORIGIN);
+      });
+    }
+
+    // High-level helpers: run a reporter (returns string) or a command (no return)
+    function nlwRunReporter(reporter) {
+      // Contract understood by NetLogo Web embed: ask the observer to runresult reporter
+      return postToNLW({ action: "runresult", agent: "observer", code: reporter });
+    }
+    function nlwRunCommand(command) {
+      // Ask the observer to run a command
+      return postToNLW({ action: "run", agent: "observer", code: command });
+    }
+
+    /******************************************************************
+     * CSV + Drive/local glue
+     ******************************************************************/
+    const elMode = document.getElementById("mode");
+    const elOut = document.getElementById("output");
+    const elBase = document.getElementById("filebase");
+
+    function ts() {
+      const d = new Date();
+      const pad = (n)=> String(n).padStart(2,"0");
+      return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+    }
+
+    function log(msg, css="muted") {
+      const div = document.createElement("div");
+      div.className = `logline ${css}`;
+      div.textContent = msg;
+      elOut.appendChild(div);
+    }
+    function logLinks(title, openUrl, dlUrl) {
+      const wrapper = document.createElement("div");
+      wrapper.className = "links ok";
+      wrapper.innerHTML = `<div>${title}</div>
+        <a target="_blank" rel="noopener" href="${openUrl}">File (open)</a>
+        <a target="_blank" rel="noopener" href="${dlUrl}">File (download)</a>`;
+      elOut.appendChild(wrapper);
+    }
+    function clearOutput() {
+      elOut.textContent = "";
+    }
+
+    // Utilities: local download
+    function downloadCSVLocally(filename, text) {
+      const blob = new Blob([text], { type: "text/csv" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      URL.revokeObjectURL(url);
+      a.remove();
+    }
+
+    // Upload to Apps Script
+    async function uploadCSVToDrive(filename, csvText) {
+      const url = `${APPS_SCRIPT_URL}?filename=${encodeURIComponent(filename)}`;
+      const resp = await fetch(url, {
+        method: "POST",
+        mode: "cors",
+        headers: { "Content-Type": "text/csv" },
+        body: csvText
+      });
+      const text = await resp.text();
+      if (!resp.ok) throw new Error(`Apps Script error: ${resp.status} ${text}`);
+      // Expecting plain text with "SAVED: ...\nFile (open): ...\nFile (download): ..."
+      const openMatch = text.match(/File \(open\):\s*(\S+)/i);
+      const dlMatch   = text.match(/File \(download\):\s*(\S+)/i);
+      return {
+        raw:text,
+        openUrl: openMatch ? openMatch[1] : null,
+        dlUrl: dlMatch ? dlMatch[1] : null
+      };
+    }
+
+    // Core actions: get reporter, then either upload or download
+    async function handleCSV(kind) {
+      // kind: "init" | "run"
+      clearOutput();
+      log(`Requesting ${kind.toUpperCase()} CSV from model…`);
+      try {
+        // Ask the model for the reporter value
+        const reporter = (kind === "init") ? "csv-init-text" : "csv-run-text";
+        const csv = await nlwRunReporter(reporter);
+        if (!csv || !String(csv).trim()) {
+          log(`The ${kind} CSV is empty — nothing to ${elMode.value === "drive" ? "upload" : "download"}.`, "err");
+          return;
+        }
+
+        const base = (elBase.value || "logger").trim();
+        const name = (kind === "init")
+          ? `${base}_world_init_data_${ts()}.csv`
+          : `${base}_run_${ts()}.csv`;
+
+        if (elMode.value === "drive") {
+          log("Uploading to Google Drive (Apps Script)…");
+          const { openUrl, dlUrl, raw } = await uploadCSVToDrive(name, csv);
+          log(`SAVED: ${name}`, "ok");
+          if (openUrl || dlUrl) logLinks("Links returned by Apps Script:", openUrl || "#", dlUrl || "#");
+          else log(raw, "muted");
+
+          // If we just uploaded RUN data successfully, clear the model's run buffer
+          if (kind === "run") {
+            log("Clearing run buffer in the model…");
+            await nlwRunCommand("clear-csv-run");
+            log("Run buffer cleared.", "ok");
+          }
+        } else {
+          downloadCSVLocally(name, csv);
+          log(`Downloaded ${name} locally.`, "ok");
+          // Optional: also clear if RUN downloaded locally
+          if (kind === "run") {
+            log("Clearing run buffer in the model…");
+            await nlwRunCommand("clear-csv-run");
+            log("Run buffer cleared.", "ok");
+          }
+        }
+      } catch (e) {
+        log(`Error: ${e.message}`, "err");
+      }
+    }
+
+    // Wire buttons
+    document.getElementById("btn-init").addEventListener("click", () => handleCSV("init"));
+    document.getElementById("btn-run").addEventListener("click", () => handleCSV("run"));
+
+    // Friendly notice when the iframe is ready
+    nlwFrame.addEventListener("load", () => {
+      clearOutput();
+      log("Model iframe loaded. You can use the buttons now.", "ok");
+      // (Optional) Ping the model so it knows we’ll be sending run/runresult requests.
+      try {
+        nlwFrame.contentWindow.postMessage({ hello:"wrapper-ready" }, NLW_ORIGIN);
+      } catch {}
+    });
   </script>
 </body>
 </html>
