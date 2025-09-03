@@ -34,13 +34,13 @@
   <h1>Traffic Simulation Logger</h1>
 
   <div class="wrapper">
-    <!-- NetLogo Web model in an iframe -->
     <iframe id="nlw"
       src="https://www.netlogoweb.org/launch#https://www.netlogoweb.org/assets/modelslib/Sample%20Models/Biology/Wolf%20Sheep%20Predation.nlogo"
       referrerpolicy="no-referrer"
     ></iframe>
 
-    <div id="controls">
+    <!-- FLOATING CONTROLS (everything stays inside this div) -->
+    <div id="controls" style="z-index:10; box-shadow:0 2px 8px rgba(0,0,0,.15);">
       <div class="row">
         <label class="muted">Mode:</label>
         <select id="mode">
@@ -49,19 +49,20 @@
         </select>
         <span class="tiny muted">After a successful <b>Run</b> upload, the model buffer will be cleared.</span>
       </div>
-  </div>
 
-    <div class="row">
-      <button id="btn-init">Download Init CSV</button>
-      <button id="btn-run">Download Run CSV</button>
-    </div>
+      <div class="row">
+        <button id="btn-init">Download Init CSV</button>
+        <button id="btn-run">Download Run CSV</button>
+      </div>
 
-    <!-- Optional: override file base (kept simple) -->
-    <div class="row">
-      <label class="muted" for="filebase">File base:</label>
-      <input id="filebase" type="text" value="logger" size="14" />
+      <div class="row">
+        <label class="muted" for="filebase">File base:</label>
+        <input id="filebase" type="text" value="logger" size="14" />
+      </div>
     </div>
+    <!-- end #controls -->
   </div>
+  <!-- end .wrapper -->
 
   <div id="output" class="muted">Wrapper page loaded. Waiting for the model…</div>
 
