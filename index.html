@@ -87,6 +87,7 @@
 
   window.addEventListener("message", (event) => {
     console.log("RAW MESSAGE >>>", event.origin, event.data); // ← add this line
+    
     // Only accept messages that come from our iframe window
     if (event.source !== nlwFrame.contentWindow) return;
     // If an origin is provided, it must be one we allow
@@ -108,7 +109,7 @@
     pending.delete(hit.id);
     if (!bridgeReady) bridgeReady = true;
     hit.ok ? resolve(hit.val) : reject(new Error(hit.err || "NetLogo Web error"));
-  }false);
+  }, false);
 
   function talk(payloadVariants, timeoutMs = 25000) {
     return new Promise((resolve, reject) => {
