@@ -59,199 +59,218 @@
   </div>
 
   <div id="output" class="muted">Wrapper page loaded. Waiting for the model…</div>
-
+  
   <script>
-    /***********************
-     * 🔧 SET THIS ONCE:
-     ***********************/
-    const APPS_SCRIPT_URL =
-      "https://script.google.com/macros/s/AKfycby8icKZjsdXeHmxIprEKsfjPq3rcWcVvDRt8Vib41DB1EbqBt5FpGqkeuSA5PGQvIZ9/exec";
-    // ↑ Replace if you redeploy. Leave as-is to use the URL you sent me.
+  /***********************
+   * 🔧 SET THIS ONCE:
+   ***********************/
+  const APPS_SCRIPT_URL =
+    "https://script.google.com/macros/s/AKfycby8icKZjsdXeHmxIprEKsfjPq3rcWcVvDRt8Vib41DB1EbqBt5FpGqkeuSA5PGQvIZ9/exec";
+  // ↑ Replace if you redeploy. Leave as-is to use the URL you sent me.
 
-    /******************************************************************
-     * NetLogo Web messaging helper
-     * - We send requests to the iframe using window.postMessage.
-     * - The iframe (NetLogo Web) responds with results or errors.
-     * This uses a compact request/response pattern with requestId.
-     ******************************************************************/
-    const nlwFrame = document.getElementById("nlw");
-    const NLW_ORIGIN = "https://www.netlogoweb.org";
+  /******************************************************************
+   * NetLogo(Web/HubNet Web) messaging — robust version
+   * - Accepts multiple message shapes and both www/non-www origins
+   * - Handshakes before first call
+   * - Longer timeout
+   ******************************************************************/
+  const nlwFrame = document.getElementById("nlw");
+  const OK_ORIGINS = new Set([
+    "https://www.netlogoweb.org",
+    "https://netlogoweb.org"
+  ]);
 
-    let requestSeq = 0;
-    const pending = new Map(); // id -> {resolve,reject,timeout}
+  let req = 0;                        // request id counter
+  const pending = new Map();          // id -> {resolve, reject, t}
+  let bridgeReady = false;
 
-    window.addEventListener("message", (event) => {
-      if (event.origin !== NLW_ORIGIN) return;
-      const data = event.data || {};
-      // Accept two generic shapes:
-      // { nlw: "ok"|"error", requestId, result?, error? }
-      // or { type: "nlw:ok"|"nlw:error", id, value?, message? }
-      let id, isOk, value, message;
-      if (data && typeof data === "object") {
-        if ("nlw" in data) {
-          id = data.requestId; isOk = data.nlw === "ok";
-          value = data.result; message = data.error;
-        } else if ("type" in data) {
-          id = data.id; isOk = data.type === "nlw:ok";
-          value = data.value; message = data.message;
-        } else {
-          return; // not ours
+  window.addEventListener("message", (event) => {
+    // Only accept messages that come from our iframe window
+    if (event.source !== nlwFrame.contentWindow) return;
+    // If an origin is provided, it must be one we allow
+    if (event.origin && !OK_ORIGINS.has(event.origin)) return;
+
+    const d = event.data || {};
+    // Try common reply shapes used by NLW/HubNet Web builds
+    const candidates = [
+      { ok: d && d.nlw === "ok",       id: d.requestId, val: d.result,  err: d.error },
+      { ok: d && d.type === "nlw:ok",  id: d.id,        val: d.value,   err: d.message },
+      { ok: d && d.type === "NLW_OK",  id: d.id,        val: d.value,   err: d.message },
+      { ok: d && d.ok === true,        id: d.id,        val: d.value,   err: d.error }  // super-fallback
+    ];
+    const hit = candidates.find(c => (c.id || c.id === 0) && (c.ok || c.err));
+    if (!hit || !pending.has(hit.id)) return;
+
+    const { resolve, reject, t } = pending.get(hit.id);
+    clearTimeout(t);
+    pending.delete(hit.id);
+    if (!bridgeReady) bridgeReady = true;
+    hit.ok ? resolve(hit.val) : reject(new Error(hit.err || "NetLogo Web error"));
+  });
+
+  function talk(payloadVariants, timeoutMs = 25000) {
+    return new Promise((resolve, reject) => {
+      const id = "r" + (++req);
+      const t = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error("Timed out waiting for NetLogo Web response."));
+      }, timeoutMs);
+      pending.set(id, { resolve, reject, t });
+
+      // Fire all supported request shapes; whichever the iframe understands will respond
+      const send = (msg) => nlwFrame.contentWindow.postMessage({ ...msg, id, requestId: id }, "*");
+      payloadVariants.forEach(send);
+    });
+  }
+
+  async function ensureBridge() {
+    if (bridgeReady) return;
+    try { await nlwRunReporter("(1 + 1)"); bridgeReady = true; }
+    catch { /* first real call will retry */ }
+  }
+
+  // High-level helpers used by CSV logic
+  async function nlwRunReporter(code) {
+    await ensureBridge();
+    return talk([
+      { action: "runresult", agent: "observer", code },
+      { type:   "nlw:runresult", agent: "observer", code },
+      { type:   "NLW_RUNRESULT", agent: "observer", code },
+      { action: "runresult", code },
+      { type:   "nlw:runresult", code }
+    ]);
+  }
+
+  async function nlwRunCommand(code) {
+    await ensureBridge();
+    return talk([
+      { action: "run", agent: "observer", code },
+      { type:   "nlw:run", agent: "observer", code },
+      { type:   "NLW_RUN", agent: "observer", code },
+      { action: "run", code },
+      { type:   "nlw:run", code }
+    ]);
+  }
+
+  // Friendly notice when the iframe is ready (+kick handshake)
+  nlwFrame.addEventListener("load", () => {
+    clearOutput();
+    log("Model iframe loaded. You can use the buttons now.", "ok");
+    bridgeReady = false;
+    setTimeout(() => ensureBridge().catch(() => {}), 500);
+    try { nlwFrame.contentWindow.postMessage({ hello: "wrapper-ready" }, "*"); } catch {}
+  });
+
+  /******************************************************************
+   * CSV + Drive/local glue (unchanged)
+   ******************************************************************/
+  const elMode = document.getElementById("mode");
+  const elOut  = document.getElementById("output");
+  const elBase = document.getElementById("filebase");
+
+  function ts() {
+    const d = new Date();
+    const pad = (n)=> String(n).padStart(2,"0");
+    return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+  }
+
+  function log(msg, css="muted") {
+    const div = document.createElement("div");
+    div.className = `logline ${css}`;
+    div.textContent = msg;
+    elOut.appendChild(div);
+  }
+  function logLinks(title, openUrl, dlUrl) {
+    const wrapper = document.createElement("div");
+    wrapper.className = "links ok";
+    wrapper.innerHTML = `<div>${title}</div>
+      <a target="_blank" rel="noopener" href="${openUrl}">File (open)</a>
+      <a target="_blank" rel="noopener" href="${dlUrl}">File (download)</a>`;
+    elOut.appendChild(wrapper);
+  }
+  function clearOutput() {
+    elOut.textContent = "";
+  }
+
+  // Local download
+  function downloadCSVLocally(filename, text) {
+    const blob = new Blob([text], { type: "text/csv" });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href = url; a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    URL.revokeObjectURL(url);
+    a.remove();
+  }
+
+  // Upload to Apps Script
+  async function uploadCSVToDrive(filename, csvText) {
+    const url = `${APPS_SCRIPT_URL}?filename=${encodeURIComponent(filename)}`;
+    const resp = await fetch(url, {
+      method: "POST",
+      mode: "cors",
+      headers: { "Content-Type": "text/csv" },
+      body: csvText
+    });
+    const text = await resp.text();
+    if (!resp.ok) throw new Error(`Apps Script error: ${resp.status} ${text}`);
+    const openMatch = text.match(/File \(open\):\s*(\S+)/i);
+    const dlMatch   = text.match(/File \(download\):\s*(\S+)/i);
+    return {
+      raw: text,
+      openUrl: openMatch ? openMatch[1] : null,
+      dlUrl:   dlMatch ? dlMatch[1]   : null
+    };
+  }
+
+  // Core actions: get reporter, then upload/download
+  async function handleCSV(kind) {
+    // kind: "init" | "run"
+    clearOutput();
+    log(`Requesting ${kind.toUpperCase()} CSV from model…`);
+    try {
+      const reporter = (kind === "init") ? "csv-init-text" : "csv-run-text";
+      const csv = await nlwRunReporter(reporter);
+      if (!csv || !String(csv).trim()) {
+        log(`The ${kind} CSV is empty — nothing to ${elMode.value === "drive" ? "upload" : "download"}.`, "err");
+        return;
+      }
+
+      const base = (elBase.value || "logger").trim();
+      const name = (kind === "init")
+        ? `${base}_world_init_data_${ts()}.csv`
+        : `${base}_run_${ts()}.csv`;
+
+      if (elMode.value === "drive") {
+        log("Uploading to Google Drive (Apps Script)…");
+        const { openUrl, dlUrl, raw } = await uploadCSVToDrive(name, csv);
+        log(`SAVED: ${name}`, "ok");
+        if (openUrl || dlUrl) logLinks("Links returned by Apps Script:", openUrl || "#", dlUrl || "#");
+        else log(raw, "muted");
+
+        if (kind === "run") {
+          log("Clearing run buffer in the model…");
+          await nlwRunCommand("clear-csv-run");
+          log("Run buffer cleared.", "ok");
+        }
+      } else {
+        downloadCSVLocally(name, csv);
+        log(`Downloaded ${name} locally.`, "ok");
+        if (kind === "run") {
+          log("Clearing run buffer in the model…");
+          await nlwRunCommand("clear-csv-run");
+          log("Run buffer cleared.", "ok");
         }
       }
-      if (!pending.has(id)) return;
-      const { resolve, reject, timeout } = pending.get(id);
-      clearTimeout(timeout);
-      pending.delete(id);
-      isOk ? resolve(value) : reject(new Error(message || "Unknown NLW error"));
-    });
-
-    function postToNLW(payload) {
-      return new Promise((resolve, reject) => {
-        const requestId = "req-" + (++requestSeq);
-        const msg = { ...payload, requestId };
-        const timeout = setTimeout(() => {
-          pending.delete(requestId);
-          reject(new Error("Timed out waiting for NetLogo Web response."));
-        }, 15000);
-        pending.set(requestId, { resolve, reject, timeout });
-        nlwFrame.contentWindow.postMessage(msg, NLW_ORIGIN);
-      });
+    } catch (e) {
+      log(`Error: ${e.message}`, "err");
     }
+  }
 
-    // High-level helpers: run a reporter (returns string) or a command (no return)
-    function nlwRunReporter(reporter) {
-      // Contract understood by NetLogo Web embed: ask the observer to runresult reporter
-      return postToNLW({ action: "runresult", agent: "observer", code: reporter });
-    }
-    function nlwRunCommand(command) {
-      // Ask the observer to run a command
-      return postToNLW({ action: "run", agent: "observer", code: command });
-    }
-
-    /******************************************************************
-     * CSV + Drive/local glue
-     ******************************************************************/
-    const elMode = document.getElementById("mode");
-    const elOut = document.getElementById("output");
-    const elBase = document.getElementById("filebase");
-
-    function ts() {
-      const d = new Date();
-      const pad = (n)=> String(n).padStart(2,"0");
-      return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
-    }
-
-    function log(msg, css="muted") {
-      const div = document.createElement("div");
-      div.className = `logline ${css}`;
-      div.textContent = msg;
-      elOut.appendChild(div);
-    }
-    function logLinks(title, openUrl, dlUrl) {
-      const wrapper = document.createElement("div");
-      wrapper.className = "links ok";
-      wrapper.innerHTML = `<div>${title}</div>
-        <a target="_blank" rel="noopener" href="${openUrl}">File (open)</a>
-        <a target="_blank" rel="noopener" href="${dlUrl}">File (download)</a>`;
-      elOut.appendChild(wrapper);
-    }
-    function clearOutput() {
-      elOut.textContent = "";
-    }
-
-    // Utilities: local download
-    function downloadCSVLocally(filename, text) {
-      const blob = new Blob([text], { type: "text/csv" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url; a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      URL.revokeObjectURL(url);
-      a.remove();
-    }
-
-    // Upload to Apps Script
-    async function uploadCSVToDrive(filename, csvText) {
-      const url = `${APPS_SCRIPT_URL}?filename=${encodeURIComponent(filename)}`;
-      const resp = await fetch(url, {
-        method: "POST",
-        mode: "cors",
-        headers: { "Content-Type": "text/csv" },
-        body: csvText
-      });
-      const text = await resp.text();
-      if (!resp.ok) throw new Error(`Apps Script error: ${resp.status} ${text}`);
-      // Expecting plain text with "SAVED: ...\nFile (open): ...\nFile (download): ..."
-      const openMatch = text.match(/File \(open\):\s*(\S+)/i);
-      const dlMatch   = text.match(/File \(download\):\s*(\S+)/i);
-      return {
-        raw:text,
-        openUrl: openMatch ? openMatch[1] : null,
-        dlUrl: dlMatch ? dlMatch[1] : null
-      };
-    }
-
-    // Core actions: get reporter, then either upload or download
-    async function handleCSV(kind) {
-      // kind: "init" | "run"
-      clearOutput();
-      log(`Requesting ${kind.toUpperCase()} CSV from model…`);
-      try {
-        // Ask the model for the reporter value
-        const reporter = (kind === "init") ? "csv-init-text" : "csv-run-text";
-        const csv = await nlwRunReporter(reporter);
-        if (!csv || !String(csv).trim()) {
-          log(`The ${kind} CSV is empty — nothing to ${elMode.value === "drive" ? "upload" : "download"}.`, "err");
-          return;
-        }
-
-        const base = (elBase.value || "logger").trim();
-        const name = (kind === "init")
-          ? `${base}_world_init_data_${ts()}.csv`
-          : `${base}_run_${ts()}.csv`;
-
-        if (elMode.value === "drive") {
-          log("Uploading to Google Drive (Apps Script)…");
-          const { openUrl, dlUrl, raw } = await uploadCSVToDrive(name, csv);
-          log(`SAVED: ${name}`, "ok");
-          if (openUrl || dlUrl) logLinks("Links returned by Apps Script:", openUrl || "#", dlUrl || "#");
-          else log(raw, "muted");
-
-          // If we just uploaded RUN data successfully, clear the model's run buffer
-          if (kind === "run") {
-            log("Clearing run buffer in the model…");
-            await nlwRunCommand("clear-csv-run");
-            log("Run buffer cleared.", "ok");
-          }
-        } else {
-          downloadCSVLocally(name, csv);
-          log(`Downloaded ${name} locally.`, "ok");
-          // Optional: also clear if RUN downloaded locally
-          if (kind === "run") {
-            log("Clearing run buffer in the model…");
-            await nlwRunCommand("clear-csv-run");
-            log("Run buffer cleared.", "ok");
-          }
-        }
-      } catch (e) {
-        log(`Error: ${e.message}`, "err");
-      }
-    }
-
-    // Wire buttons
-    document.getElementById("btn-init").addEventListener("click", () => handleCSV("init"));
-    document.getElementById("btn-run").addEventListener("click", () => handleCSV("run"));
-
-    // Friendly notice when the iframe is ready
-    nlwFrame.addEventListener("load", () => {
-      clearOutput();
-      log("Model iframe loaded. You can use the buttons now.", "ok");
-      // (Optional) Ping the model so it knows we’ll be sending run/runresult requests.
-      try {
-        nlwFrame.contentWindow.postMessage({ hello:"wrapper-ready" }, NLW_ORIGIN);
-      } catch {}
-    });
-  </script>
+  // Wire buttons
+  document.getElementById("btn-init").addEventListener("click", () => handleCSV("init"));
+  document.getElementById("btn-run").addEventListener("click", () => handleCSV("run"));
+ </script>
 </body>
 </html>
