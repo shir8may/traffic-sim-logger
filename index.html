@@ -75,10 +75,11 @@
     "https://netlogoweb.org",
     "https://shir8may.github.io",
     window.location.origin, // allow same-origin bubble-backs
+    // "http://localhost:8080", "http://127.0.0.1:8080" // dev only
   ]);
   
   /******************************************************************
-   * Small DOM helpers
+   * DOM helpers
    ******************************************************************/
   const elMode = document.getElementById("mode");
   const elOut  = document.getElementById("output");
@@ -134,15 +135,28 @@
   }
   
   /******************************************************************
-   * Robust NetLogo Web bridge (handshake + multi-shape replies)
+   * NLW bridge: targets, trust, debug
    ******************************************************************/
   let req = 0;
   const pending = new Map();
   let nlwReady = false;
   
+  function isChildOf(rootWin, maybeChild) {
+    if (!rootWin || !maybeChild) return false;
+    try {
+      if (rootWin === maybeChild) return true;
+      const f = rootWin.frames;
+      for (let i = 0; i < f.length; i++) {
+        if (isChildOf(f[i], maybeChild)) return true;
+      }
+    } catch {}
+    return false;
+  }
   function isFromIframeSource(event) {
-    try { return event.source === nlwFrame.contentWindow; }
-    catch { return false; }
+    try {
+      return event.source === nlwFrame.contentWindow ||
+             isChildOf(nlwFrame.contentWindow, event.source);
+    } catch { return false; }
   }
   function isTrustedEvent(event) {
     if (isFromIframeSource(event)) return true;
@@ -150,11 +164,27 @@
     return false;
   }
   function dbgLog(tag, payload, extra = {}) {
-    if (!elDbg.checked) return;
+    if (!document.getElementById("debug")?.checked) return;
     console.log(tag, payload, extra);
   }
   
-  // Normalize many known reply shapes into {id, ok, value, error, ready?}
+  // Find all windows to post to: outer launch + inner model iframe(s)
+  function getNlwTargets() {
+    const targets = new Set();
+    const push = (w) => { try { if (w && typeof w.postMessage === "function") targets.add(w); } catch {} };
+  
+    push(nlwFrame.contentWindow); // outer
+    try {
+      const f = nlwFrame.contentWindow?.frames;
+      for (let i = 0; i < (f?.length || 0); i++) push(f[i]); // inner(s)
+    } catch {}
+  
+    return Array.from(targets);
+  }
+  
+  /******************************************************************
+   * Reply normalization + receiver
+   ******************************************************************/
   function normalizeReply(data) {
     if (typeof data !== "object" || data === null) return null;
   
@@ -164,15 +194,13 @@
       data.type === "ready" ||
       data.type === "nlw:ready" ||
       data.type === "NLW_READY" ||
-      data.nlw === "ready" ||
-      false;
+      data.nlw === "ready" || false;
   
     const ok =
       data.nlw === "ok" ||
       data.type === "nlw:ok" ||
       data.type === "NLW_OK" ||
-      data.ok === true ||
-      false;
+      data.ok === true || false;
   
     let value = undefined;
     if ("result" in data) value = data.result;
@@ -180,16 +208,13 @@
   
     const error = data.error || data.message || null;
   
-    // Some builds wrap as {type:"...", payload:{...}}
     if (!ok && !ready && !error && data.payload && typeof data.payload === "object") {
       const inner = normalizeReply(data.payload);
       if (inner) return inner;
     }
-  
     return { id, ok, value, error, ready };
   }
   
-  // Global message handler
   window.addEventListener("message", (event) => {
     if (!isTrustedEvent(event)) return;
   
@@ -199,17 +224,15 @@
     if (!norm) return;
   
     const { id, ok, value, error, ready } = norm;
-  
     if (ready) nlwReady = true;
   
-    // A) Normal: match by id
+    // A) normal: id matches
     if (id && pending.has(id)) {
       const { resolve, reject, t } = pending.get(id);
       clearTimeout(t); pending.delete(id);
-      return ok || ready ? resolve(value) : reject(new Error(error || "Unknown reply"));
+      return (ok || ready) ? resolve(value) : reject(new Error(error || "Unknown reply"));
     }
-  
-    // B) Idless but OK → resolve oldest pending (fallback)
+    // B) idless OK → resolve oldest pending
     if (!id && (ok || ready) && (value !== undefined || ready) && pending.size > 0) {
       const oldestId = pending.keys().next().value;
       const { resolve, t } = pending.get(oldestId);
@@ -219,7 +242,9 @@
     }
   }, false);
   
-  // Send a burst of equivalent requests; resolve on first good reply.
+  /******************************************************************
+   * talk(): post to ALL candidate frames (outer + inner), with retries
+   ******************************************************************/
   function talk(payloads, timeoutMs = 25000) {
     return new Promise((resolve, reject) => {
       const id = "r" + (++req);
@@ -229,75 +254,87 @@
       }, timeoutMs);
       pending.set(id, { resolve, reject, t });
   
-      const send = (msg) => {
-        const outgoing = { ...msg, id, requestId: id };
-        dbgLog("SEND >>>", outgoing);
-        nlwFrame.contentWindow.postMessage(outgoing, "*");
+      const sendOnce = () => {
+        const targets = getNlwTargets();
+        if (targets.length === 0) dbgLog("WARN no targets yet", {});
+        for (const msg of payloads) {
+          const outgoing = { ...msg, id, requestId: id };
+          for (const win of targets) {
+            dbgLog("SEND >>>", outgoing, { toFrames: targets.length });
+            try { win.postMessage(outgoing, "*"); } catch {}
+          }
+        }
       };
-      payloads.forEach(send);
+  
+      // Fire now, then twice more in case the inner iframe appears a bit later
+      sendOnce();
+      setTimeout(sendOnce, 200);
+      setTimeout(sendOnce, 750);
     });
   }
   
-  // Auto-wrap a bare reporter name to a valid NetLogo expression.
+  /******************************************************************
+   * Handshake + convenience helpers
+   ******************************************************************/
   function wrapReporter(expr) {
     const s = String(expr).trim();
     if (!s) return "()";
     if (s.startsWith("(") && s.endsWith(")")) return s;
-    if (/[ \t\n\r"'`]/.test(s)) return s; // looks like an expression
+    if (/[ \t\n\r"'`]/.test(s)) return s; // already an expression
     return `(${s})`;
   }
   
-  // — Handshake —
-  // Some NLW builds only answer after an internal “ready”; we ping until something answers.
   let handshakeOnce;
   function ensureReady(timeoutMs = 12000) {
     if (nlwReady) return Promise.resolve(true);
     if (!handshakeOnce) {
       handshakeOnce = (async () => {
-        // three short attempts with small waits; any reply marks ready
         const attempts = [
-          [{ action: "runresult", agent: "observer", code: "(1)" },
-           { type: "nlw:runresult", agent: "observer", code: "(1)" },
-           { type: "NLW_RUNRESULT", agent: "observer", code: "(1)" }],
-          [{ action: "runresult", code: "(1)" }, { type: "nlw:runresult", code: "(1)" }],
-          [{ action: "run", agent: "observer", code: "print 1" }, { type: "nlw:run", agent: "observer", code: "print 1" }]
+          [{ action:"runresult", agent:"observer", code:"(1)" },
+           { type:"nlw:runresult", agent:"observer", code:"(1)" },
+           { type:"NLW_RUNRESULT", agent:"observer", code:"(1)" }],
+          [{ action:"runresult", code:"(1)" }, { type:"nlw:runresult", code:"(1)" }],
+          [{ action:"run", agent:"observer", code:"print 1" },
+           { type:"nlw:run", agent:"observer", code:"print 1" }]
         ];
-        for (let i = 0; i < attempts.length; i++) {
+        for (let i=0;i<attempts.length;i++){
           try { await talk(attempts[i], 3000); nlwReady = true; return true; }
-          catch { await new Promise(r => setTimeout(r, 250)); }
+          catch { await new Promise(r=>setTimeout(r,250)); }
         }
         throw new Error("Handshake with NetLogo Web failed.");
       })();
     }
     return Promise.race([
       handshakeOnce,
-      new Promise((_, rej) => setTimeout(() => rej(new Error("Handshake timed out.")), timeoutMs))
+      new Promise((_,rej)=>setTimeout(()=>rej(new Error("Handshake timed out.")), timeoutMs))
     ]);
   }
   
   async function nlwRunReporter(expr) {
-    await ensureReady().catch(()=>{}); // don’t hard-fail; runresult below may still work
+    await ensureReady().catch(()=>{});
     const code = wrapReporter(expr);
     return talk([
-      { action: "runresult", agent: "observer", code },
-      { type: "nlw:runresult", agent: "observer", code },
-      { type: "NLW_RUNRESULT", agent: "observer", code },
-      { action: "runresult", code },
-      { type: "nlw:runresult", code }
+      { action:"runresult", agent:"observer", code },
+      { type:"nlw:runresult", agent:"observer", code },
+      { type:"NLW_RUNRESULT", agent:"observer", code },
+      { action:"runresult", code },
+      { type:"nlw:runresult", code }
     ]);
   }
   async function nlwRunCommand(code) {
     await ensureReady().catch(()=>{});
     return talk([
-      { action: "run", agent: "observer", code },
-      { type: "nlw:run", agent: "observer", code },
-      { type: "NLW_RUN", agent: "observer", code },
-      { action: "run", code },
-      { type: "nlw:run", code }
+      { action:"run", agent:"observer", code },
+      { type:"nlw:run", agent:"observer", code },
+      { type:"NLW_RUN", agent:"observer", code },
+      { action:"run", code },
+      { type:"nlw:run", code }
     ]);
   }
   
-  // Friendly load note
+  /******************************************************************
+   * Page lifecycle + CSV workflow
+   ******************************************************************/
   nlwFrame.addEventListener("load", () => {
     clearOutput();
     nlwReady = false;
@@ -305,9 +342,6 @@
     log("Model iframe loaded. You can use the buttons now.", "ok");
   });
   
-  /******************************************************************
-   * CSV workflow
-   ******************************************************************/
   async function handleCSV(kind) {
     clearOutput();
     log(`Requesting ${kind.toUpperCase()} CSV from model…`);
