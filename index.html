@@ -90,7 +90,7 @@
     console.log("RAW MESSAGE >>>", event.origin, event.data); // ← add this line
     
     // Only accept messages that come from our iframe window
-    if (event.source !== nlwFrame.contentWindow) {console.log("NLW >>>", event.origin, event.data);}
+    if (event.source == nlwFrame.contentWindow) {console.log("NLW >>>", event.origin, event.data);}
     // If an origin is provided, it must be one we allow
     if (event.origin && !OK_ORIGINS.has(event.origin)) return;
 
