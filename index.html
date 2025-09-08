@@ -69,17 +69,14 @@
    ***********************/
   const APPS_SCRIPT_URL =
     "https://script.google.com/macros/s/AKfycby8icKZjsdXeHmxIprEKsfjPq3rcWcVvDRt8Vib41DB1EbqBt5FpGqkeuSA5PGQvIZ9/exec";
-
-  // Origins we accept messages from (in addition to the iframe window itself).
+  
   const ALLOWED_ORIGINS = new Set([
     "https://www.netlogoweb.org",
     "https://netlogoweb.org",
     "https://shir8may.github.io",
     window.location.origin, // allow same-origin bubble-backs
-    // "http://localhost:8080", // <- uncomment for local dev if needed
-    // "http://127.0.0.1:8080",
   ]);
-
+  
   /******************************************************************
    * Small DOM helpers
    ******************************************************************/
@@ -88,7 +85,7 @@
   const elBase = document.getElementById("filebase");
   const elDbg  = document.getElementById("debug");
   const nlwFrame = document.getElementById("nlw");
-
+  
   function ts() {
     const d = new Date();
     const pad = (n)=> String(n).padStart(2,"0");
@@ -109,7 +106,7 @@
       <a target="_blank" rel="noopener" href="${dlUrl}">File (download)</a>`;
     elOut.appendChild(wrapper);
   }
-
+  
   function downloadCSVLocally(filename, text) {
     const blob = new Blob([text], { type: "text/csv" });
     const url  = URL.createObjectURL(blob);
@@ -120,7 +117,7 @@
     URL.revokeObjectURL(url);
     a.remove();
   }
-
+  
   async function uploadCSVToDrive(filename, csvText) {
     const url = `${APPS_SCRIPT_URL}?filename=${encodeURIComponent(filename)}`;
     const resp = await fetch(url, {
@@ -131,96 +128,98 @@
     });
     const text = await resp.text();
     if (!resp.ok) throw new Error(`Apps Script error: ${resp.status} ${text}`);
-
-    // Try to parse the two link lines; otherwise just show the raw response.
     const openMatch = text.match(/File \(open\):\s*(\S+)/i);
     const dlMatch   = text.match(/File \(download\):\s*(\S+)/i);
     return { raw:text, openUrl: openMatch?.[1] || null, dlUrl: dlMatch?.[1] || null };
   }
-
+  
   /******************************************************************
-   * Robust NetLogo Web bridge (multi-shape replies + idless fallback)
+   * Robust NetLogo Web bridge (handshake + multi-shape replies)
    ******************************************************************/
   let req = 0;
   const pending = new Map();
-
+  let nlwReady = false;
+  
   function isFromIframeSource(event) {
     try { return event.source === nlwFrame.contentWindow; }
     catch { return false; }
   }
-
   function isTrustedEvent(event) {
-    // Accept if it's literally from the iframe contentWindow OR origin is in our allowlist.
     if (isFromIframeSource(event)) return true;
     if (ALLOWED_ORIGINS.has(event.origin)) return true;
     return false;
   }
-
-  function dbgLog(direction, payload, extra = {}) {
+  function dbgLog(tag, payload, extra = {}) {
     if (!elDbg.checked) return;
-    const tag = direction === "SEND" ? "SEND >>>" : "EVT <<<";
     console.log(tag, payload, extra);
   }
-
-  // Normalize a reply into {id, ok, value, error}
+  
+  // Normalize many known reply shapes into {id, ok, value, error, ready?}
   function normalizeReply(data) {
     if (typeof data !== "object" || data === null) return null;
-
+  
     const id = data.requestId ?? data.id ?? null;
+  
+    const ready =
+      data.type === "ready" ||
+      data.type === "nlw:ready" ||
+      data.type === "NLW_READY" ||
+      data.nlw === "ready" ||
+      false;
+  
     const ok =
       data.nlw === "ok" ||
       data.type === "nlw:ok" ||
       data.type === "NLW_OK" ||
       data.ok === true ||
       false;
-
+  
     let value = undefined;
     if ("result" in data) value = data.result;
     else if ("value" in data) value = data.value;
-
+  
     const error = data.error || data.message || null;
-
-    // Heuristic: some builds wrap as {type:"...", payload:{...}}
-    if (!ok && !error && data.payload && typeof data.payload === "object") {
+  
+    // Some builds wrap as {type:"...", payload:{...}}
+    if (!ok && !ready && !error && data.payload && typeof data.payload === "object") {
       const inner = normalizeReply(data.payload);
       if (inner) return inner;
     }
-
-    return { id, ok, value, error };
+  
+    return { id, ok, value, error, ready };
   }
-
+  
+  // Global message handler
   window.addEventListener("message", (event) => {
-    // Filter obvious noise first: must be trusted or from iframe
     if (!isTrustedEvent(event)) return;
-
-    // Optional debug (kept clean)
-    dbgLog("EVT", event.data, { origin:event.origin, sameSource:isFromIframeSource(event) });
-
+  
+    dbgLog("EVT <<<", event.data, { origin:event.origin, sameSource:isFromIframeSource(event) });
+  
     const norm = normalizeReply(event.data);
-    if (!norm) return; // ignore unrelated shapes
-
-    const { id, ok, value, error } = norm;
-
+    if (!norm) return;
+  
+    const { id, ok, value, error, ready } = norm;
+  
+    if (ready) nlwReady = true;
+  
     // A) Normal: match by id
     if (id && pending.has(id)) {
       const { resolve, reject, t } = pending.get(id);
       clearTimeout(t); pending.delete(id);
-      return ok ? resolve(value) : reject(new Error(error || "Unknown reply"));
+      return ok || ready ? resolve(value) : reject(new Error(error || "Unknown reply"));
     }
-
-    // B) Idless but looks OK → resolve the oldest pending (fallback)
-    if (!id && ok && (value !== undefined) && pending.size > 0) {
+  
+    // B) Idless but OK → resolve oldest pending (fallback)
+    if (!id && (ok || ready) && (value !== undefined || ready) && pending.size > 0) {
       const oldestId = pending.keys().next().value;
       const { resolve, t } = pending.get(oldestId);
       clearTimeout(t); pending.delete(oldestId);
       console.warn("EVT <<< FALLBACK matched (no id) -> resolving", oldestId);
       return resolve(value);
     }
-
-    // Otherwise ignore (could be a broadcast or unrelated extension message)
   }, false);
-
-  // Send a burst of equivalent requests; resolve on the first good reply.
+  
+  // Send a burst of equivalent requests; resolve on first good reply.
   function talk(payloads, timeoutMs = 25000) {
     return new Promise((resolve, reject) => {
       const id = "r" + (++req);
@@ -229,40 +228,66 @@
         reject(new Error("Timed out waiting for NetLogo Web response."));
       }, timeoutMs);
       pending.set(id, { resolve, reject, t });
-
+  
       const send = (msg) => {
         const outgoing = { ...msg, id, requestId: id };
-        dbgLog("SEND", outgoing);
-        // Using "*" because NLW frame is cross-origin; we gate on receive.
+        dbgLog("SEND >>>", outgoing);
         nlwFrame.contentWindow.postMessage(outgoing, "*");
       };
       payloads.forEach(send);
     });
   }
-
+  
   // Auto-wrap a bare reporter name to a valid NetLogo expression.
   function wrapReporter(expr) {
     const s = String(expr).trim();
     if (!s) return "()";
     if (s.startsWith("(") && s.endsWith(")")) return s;
-    // If it already looks like an expression (space or special chars), keep it.
-    if (/[ \t\n\r"'`]/.test(s)) return s;
-    // Otherwise wrap bare symbol → (symbol)
+    if (/[ \t\n\r"'`]/.test(s)) return s; // looks like an expression
     return `(${s})`;
   }
-
+  
+  // — Handshake —
+  // Some NLW builds only answer after an internal “ready”; we ping until something answers.
+  let handshakeOnce;
+  function ensureReady(timeoutMs = 12000) {
+    if (nlwReady) return Promise.resolve(true);
+    if (!handshakeOnce) {
+      handshakeOnce = (async () => {
+        // three short attempts with small waits; any reply marks ready
+        const attempts = [
+          [{ action: "runresult", agent: "observer", code: "(1)" },
+           { type: "nlw:runresult", agent: "observer", code: "(1)" },
+           { type: "NLW_RUNRESULT", agent: "observer", code: "(1)" }],
+          [{ action: "runresult", code: "(1)" }, { type: "nlw:runresult", code: "(1)" }],
+          [{ action: "run", agent: "observer", code: "print 1" }, { type: "nlw:run", agent: "observer", code: "print 1" }]
+        ];
+        for (let i = 0; i < attempts.length; i++) {
+          try { await talk(attempts[i], 3000); nlwReady = true; return true; }
+          catch { await new Promise(r => setTimeout(r, 250)); }
+        }
+        throw new Error("Handshake with NetLogo Web failed.");
+      })();
+    }
+    return Promise.race([
+      handshakeOnce,
+      new Promise((_, rej) => setTimeout(() => rej(new Error("Handshake timed out.")), timeoutMs))
+    ]);
+  }
+  
   async function nlwRunReporter(expr) {
+    await ensureReady().catch(()=>{}); // don’t hard-fail; runresult below may still work
     const code = wrapReporter(expr);
     return talk([
       { action: "runresult", agent: "observer", code },
       { type: "nlw:runresult", agent: "observer", code },
       { type: "NLW_RUNRESULT", agent: "observer", code },
-      // some older variants omit 'agent'
       { action: "runresult", code },
       { type: "nlw:runresult", code }
     ]);
   }
   async function nlwRunCommand(code) {
+    await ensureReady().catch(()=>{});
     return talk([
       { action: "run", agent: "observer", code },
       { type: "nlw:run", agent: "observer", code },
@@ -271,13 +296,15 @@
       { type: "nlw:run", code }
     ]);
   }
-
+  
   // Friendly load note
   nlwFrame.addEventListener("load", () => {
     clearOutput();
+    nlwReady = false;
+    handshakeOnce = undefined;
     log("Model iframe loaded. You can use the buttons now.", "ok");
   });
-
+  
   /******************************************************************
    * CSV workflow
    ******************************************************************/
@@ -287,17 +314,17 @@
     try {
       const reporter = (kind === "init") ? "csv-init-text" : "csv-run-text";
       const csv = await nlwRunReporter(reporter);
-
+  
       if (!csv || !String(csv).trim()) {
         log(`The ${kind} CSV is empty — nothing to ${elMode.value === "drive" ? "upload" : "download"}.`, "err");
         return;
       }
-
+  
       const base = (elBase.value || "logger").trim();
       const name = (kind === "init")
         ? `${base}_world_init_data_${ts()}.csv`
         : `${base}_run_${ts()}.csv`;
-
+  
       if (elMode.value === "drive") {
         log("Uploading to Google Drive (Apps Script)…");
         const { openUrl, dlUrl, raw } = await uploadCSVToDrive(name, csv);
@@ -311,7 +338,7 @@
         downloadCSVLocally(name, csv);
         log(`Downloaded ${name} locally.`, "ok");
       }
-
+  
       if (kind === "run") {
         log("Clearing run buffer in the model…");
         await nlwRunCommand("clear-csv-run");
@@ -321,10 +348,11 @@
       log(`Error: ${e.message}`, "err");
     }
   }
-
+  
   // Wire buttons
   document.getElementById("btn-init").addEventListener("click", () => handleCSV("init"));
   document.getElementById("btn-run").addEventListener("click", () => handleCSV("run"));
   </script>
+
 </body>
 </html>
