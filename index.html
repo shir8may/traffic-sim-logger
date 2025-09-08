@@ -74,18 +74,20 @@
     "https://www.netlogoweb.org",
     "https://netlogoweb.org",
     "https://shir8may.github.io",
-    window.location.origin, // allow same-origin bubble-backs
-    // "http://localhost:8080", "http://127.0.0.1:8080" // dev only
+    window.location.origin
   ]);
   
   /******************************************************************
-   * DOM helpers
+   * DOM
    ******************************************************************/
-  const elMode = document.getElementById("mode");
-  const elOut  = document.getElementById("output");
-  const elBase = document.getElementById("filebase");
-  const elDbg  = document.getElementById("debug");
+  const elMode   = document.getElementById("mode");
+  const elOut    = document.getElementById("output");
+  const elBase   = document.getElementById("filebase");
+  const elDbg    = document.getElementById("debug");
   const nlwFrame = document.getElementById("nlw");
+  
+  // Optional extra logger toggle (you can add a checkbox with id="logAll" next to Debug if you want)
+  let LOG_ALL = false; // set true temporarily to capture ALL postMessages (unsafe/noisy)
   
   function ts() {
     const d = new Date();
@@ -107,7 +109,6 @@
       <a target="_blank" rel="noopener" href="${dlUrl}">File (download)</a>`;
     elOut.appendChild(wrapper);
   }
-  
   function downloadCSVLocally(filename, text) {
     const blob = new Blob([text], { type: "text/csv" });
     const url  = URL.createObjectURL(blob);
@@ -118,7 +119,6 @@
     URL.revokeObjectURL(url);
     a.remove();
   }
-  
   async function uploadCSVToDrive(filename, csvText) {
     const url = `${APPS_SCRIPT_URL}?filename=${encodeURIComponent(filename)}`;
     const resp = await fetch(url, {
@@ -135,7 +135,7 @@
   }
   
   /******************************************************************
-   * NLW bridge: targets, trust, debug
+   * NLW bridge
    ******************************************************************/
   let req = 0;
   const pending = new Map();
@@ -164,26 +164,30 @@
     return false;
   }
   function dbgLog(tag, payload, extra = {}) {
-    if (!document.getElementById("debug")?.checked) return;
+    if (!elDbg?.checked) return;
     console.log(tag, payload, extra);
   }
   
-  // Find all windows to post to: outer launch + inner model iframe(s)
   function getNlwTargets() {
     const targets = new Set();
     const push = (w) => { try { if (w && typeof w.postMessage === "function") targets.add(w); } catch {} };
   
-    push(nlwFrame.contentWindow); // outer
+    push(nlwFrame.contentWindow); // outer launch
     try {
       const f = nlwFrame.contentWindow?.frames;
       for (let i = 0; i < (f?.length || 0); i++) push(f[i]); // inner(s)
     } catch {}
   
+    // Status line to help us see how many frames we found
+    if (elDbg?.checked) {
+      const count = Array.from(targets).length;
+      console.log("NLW target frames detected:", count);
+    }
     return Array.from(targets);
   }
   
   /******************************************************************
-   * Reply normalization + receiver
+   * Receiver + normalization
    ******************************************************************/
   function normalizeReply(data) {
     if (typeof data !== "object" || data === null) return null;
@@ -191,15 +195,11 @@
     const id = data.requestId ?? data.id ?? null;
   
     const ready =
-      data.type === "ready" ||
-      data.type === "nlw:ready" ||
-      data.type === "NLW_READY" ||
-      data.nlw === "ready" || false;
+      data.type === "ready" || data.type === "nlw:ready" || data.type === "NLW_READY" ||
+      data.nlw  === "ready" || false;
   
     const ok =
-      data.nlw === "ok" ||
-      data.type === "nlw:ok" ||
-      data.type === "NLW_OK" ||
+      data.nlw === "ok" || data.type === "nlw:ok" || data.type === "NLW_OK" ||
       data.ok === true || false;
   
     let value = undefined;
@@ -215,6 +215,7 @@
     return { id, ok, value, error, ready };
   }
   
+  // STRICT handler (used always)
   window.addEventListener("message", (event) => {
     if (!isTrustedEvent(event)) return;
   
@@ -226,13 +227,11 @@
     const { id, ok, value, error, ready } = norm;
     if (ready) nlwReady = true;
   
-    // A) normal: id matches
     if (id && pending.has(id)) {
       const { resolve, reject, t } = pending.get(id);
       clearTimeout(t); pending.delete(id);
       return (ok || ready) ? resolve(value) : reject(new Error(error || "Unknown reply"));
     }
-    // B) idless OK → resolve oldest pending
     if (!id && (ok || ready) && (value !== undefined || ready) && pending.size > 0) {
       const oldestId = pending.keys().next().value;
       const { resolve, t } = pending.get(oldestId);
@@ -240,6 +239,12 @@
       console.warn("EVT <<< FALLBACK matched (no id) -> resolving", oldestId);
       return resolve(value);
     }
+  }, false);
+  
+  // UNSAFE logger (optional) — set LOG_ALL = true to see every message
+  window.addEventListener("message", (event) => {
+    if (!LOG_ALL) return;
+    console.log("EVT(all) <<<", { origin: event.origin, data: event.data, sameSource: isFromIframeSource(event) });
   }, false);
   
   /******************************************************************
@@ -266,7 +271,6 @@
         }
       };
   
-      // Fire now, then twice more in case the inner iframe appears a bit later
       sendOnce();
       setTimeout(sendOnce, 200);
       setTimeout(sendOnce, 750);
@@ -274,28 +278,35 @@
   }
   
   /******************************************************************
-   * Handshake + convenience helpers
+   * Handshake + NLW helpers
    ******************************************************************/
   function wrapReporter(expr) {
     const s = String(expr).trim();
     if (!s) return "()";
     if (s.startsWith("(") && s.endsWith(")")) return s;
-    if (/[ \t\n\r"'`]/.test(s)) return s; // already an expression
+    if (/[ \t\n\r"'`]/.test(s)) return s;
     return `(${s})`;
   }
   
+  // Try a wider handshake: results, commands, and legacy hello/ready/register
   let handshakeOnce;
-  function ensureReady(timeoutMs = 12000) {
+  function ensureReady(timeoutMs = 14000) {
     if (nlwReady) return Promise.resolve(true);
     if (!handshakeOnce) {
       handshakeOnce = (async () => {
         const attempts = [
+          // common runresult
           [{ action:"runresult", agent:"observer", code:"(1)" },
            { type:"nlw:runresult", agent:"observer", code:"(1)" },
            { type:"NLW_RUNRESULT", agent:"observer", code:"(1)" }],
-          [{ action:"runresult", code:"(1)" }, { type:"nlw:runresult", code:"(1)" }],
+          // command variants
           [{ action:"run", agent:"observer", code:"print 1" },
-           { type:"nlw:run", agent:"observer", code:"print 1" }]
+           { type:"nlw:run", agent:"observer", code:"print 1" },
+           { type:"NLW_RUN", agent:"observer", code:"print 1" }],
+          // legacy-ish pings
+          [{ type:"hello" }, { type:"nlw:hello" }, { type:"NLW_HELLO" }],
+          [{ type:"ready" }, { type:"nlw:ready" }, { type:"NLW_READY" }],
+          [{ type:"register" }, { type:"nlw:register" }, { type:"NLW_REGISTER" }]
         ];
         for (let i=0;i<attempts.length;i++){
           try { await talk(attempts[i], 3000); nlwReady = true; return true; }
@@ -387,6 +398,7 @@
   document.getElementById("btn-init").addEventListener("click", () => handleCSV("init"));
   document.getElementById("btn-run").addEventListener("click", () => handleCSV("run"));
   </script>
+  
 
 </body>
 </html>
