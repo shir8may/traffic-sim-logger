@@ -75,44 +75,32 @@
    * - Handshakes before first call
    * - Longer timeout
    ******************************************************************/
+  // --- DIAGNOSTIC BRIDGE (no filters) ---
   const nlwFrame = document.getElementById("nlw");
-  const OK_ORIGINS = new Set([
-    "https://www.netlogoweb.org",
-    "https://netlogoweb.org",
-    "https://shir8may.github.io"
-  ]);
-
-  let req = 0;                        // request id counter
-  const pending = new Map();          // id -> {resolve, reject, t}
-  let bridgeReady = false;
-
+  
+  let req = 0;
+  const pending = new Map();
+  
   window.addEventListener("message", (event) => {
-    console.log("RAW MESSAGE >>>", event.origin, event.data); // ← add this line
-    
-    // Only accept messages that come from our iframe window
-    if (event.source == nlwFrame.contentWindow) {console.log("NLW >>>", event.origin, event.data);}
-    // If an origin is provided, it must be one we allow
-    if (event.origin && !OK_ORIGINS.has(event.origin)) return;
-
+    // DIAG: show EVERYTHING we get
+    console.log("EVT <<<", {origin: event.origin, data: event.data, sameSource: event.source === nlwFrame.contentWindow});
+  
     const d = event.data || {};
-    // Try common reply shapes used by NLW/HubNet Web builds
-    const candidates = [
-      { ok: d && d.nlw === "ok",       id: d.requestId, val: d.result,  err: d.error },
-      { ok: d && d.type === "nlw:ok",  id: d.id,        val: d.value,   err: d.message },
-      { ok: d && d.type === "NLW_OK",  id: d.id,        val: d.value,   err: d.message },
-      { ok: d && d.ok === true,        id: d.id,        val: d.value,   err: d.error }  // super-fallback
-    ];
-    const hit = candidates.find(c => (c.id || c.id === 0) && (c.ok || c.err));
-    if (!hit || !pending.has(hit.id)) return;
-
-    const { resolve, reject, t } = pending.get(hit.id);
-    clearTimeout(t);
-    pending.delete(hit.id);
-    if (!bridgeReady) bridgeReady = true;
-    hit.ok ? resolve(hit.val) : reject(new Error(hit.err || "NetLogo Web error"));
+    const id = d.requestId ?? d.id;
+    const isOk =
+      d.nlw === "ok" ||
+      d.type === "nlw:ok" ||
+      d.type === "NLW_OK" ||
+      d.ok === true;
+    const errMsg = d.error || d.message;
+  
+    if (!id || !pending.has(id)) return;
+    const { resolve, reject, t } = pending.get(id);
+    clearTimeout(t); pending.delete(id);
+    isOk ? resolve(d.result ?? d.value) : reject(new Error(errMsg || "Unknown reply"));
   }, false);
-
-  function talk(payloadVariants, timeoutMs = 25000) {
+  
+  function talk(payloads, timeoutMs = 25000) {
     return new Promise((resolve, reject) => {
       const id = "r" + (++req);
       const t = setTimeout(() => {
@@ -120,41 +108,35 @@
         reject(new Error("Timed out waiting for NetLogo Web response."));
       }, timeoutMs);
       pending.set(id, { resolve, reject, t });
-
-      // Fire all supported request shapes; whichever the iframe understands will respond
-      const send = (msg) => nlwFrame.contentWindow.postMessage({ ...msg, id, requestId: id }, "*");
-      payloadVariants.forEach(send);
+  
+      const send = (msg) => {
+        const outgoing = { ...msg, id, requestId: id };
+        console.log("SEND >>>", outgoing);                    // DIAG: log sent
+        nlwFrame.contentWindow.postMessage(outgoing, "*");    // no origin filter
+      };
+      payloads.forEach(send);
     });
   }
-
-  async function ensureBridge() {
-    if (bridgeReady) return;
-    try { await nlwRunReporter("(1 + 1)"); bridgeReady = true; }
-    catch { /* first real call will retry */ }
-  }
-
-  // High-level helpers used by CSV logic
+  
   async function nlwRunReporter(code) {
-    await ensureBridge();
     return talk([
-      { action: "runresult", agent: "observer", code },
-      { type:   "nlw:runresult", agent: "observer", code },
-      { type:   "NLW_RUNRESULT", agent: "observer", code },
-      { action: "runresult", code },
-      { type:   "nlw:runresult", code }
+      { action:"runresult", agent:"observer", code },
+      { type:"nlw:runresult", agent:"observer", code },
+      { type:"NLW_RUNRESULT", agent:"observer", code },
+      { action:"runresult", code },
+      { type:"nlw:runresult", code }
+    ]);
+  }
+  async function nlwRunCommand(code) {
+    return talk([
+      { action:"run", agent:"observer", code },
+      { type:"nlw:run", agent:"observer", code },
+      { type:"NLW_RUN", agent:"observer", code },
+      { action:"run", code },
+      { type:"nlw:run", code }
     ]);
   }
 
-  async function nlwRunCommand(code) {
-    await ensureBridge();
-    return talk([
-      { action: "run", agent: "observer", code },
-      { type:   "nlw:run", agent: "observer", code },
-      { type:   "NLW_RUN", agent: "observer", code },
-      { action: "run", code },
-      { type:   "nlw:run", code }
-    ]);
-  }
 
   // Friendly notice when the iframe is ready (+kick handshake)
   nlwFrame.addEventListener("load", () => {
