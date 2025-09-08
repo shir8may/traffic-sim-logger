@@ -49,6 +49,16 @@
     </div>
 
     <div class="row">
+      <label class="muted">Model Loader:</label>
+      <select id="loader">
+        <option value="A">A — Launch shell (current)</option>
+        <option value="B" selected>B — Embed player</option>
+        <option value="C">C — Minimal player</option>
+      </select>
+      <span id="frameCount" class="tiny muted"></span>
+    </div>
+    
+    <div class="row">
       <button id="btn-init">Download Init CSV</button>
       <button id="btn-run">Download Run CSV</button>
     </div>
@@ -76,6 +86,60 @@
     "https://shir8may.github.io",
     window.location.origin
   ]);
+    
+  /******************************
+   * Model URLs + loader helper
+   ******************************/
+  const MODEL_URL = "https://shir8may.github.io/traffic-sim-logger/traffic-sim.nlogo";
+  
+  // Candidate iframe srcs we’ll try (same model), pick the one that returns messages
+  const SRC_VARIANTS = {
+    // A) Original “launch” wrapper (often nests an inner iframe → can break postMessage)
+    A: (model) => `https://www.netlogoweb.org/launch#${model}`,
+  
+    // B) Embed/standalone player (preferred; usually a single responsive player frame)
+    // (Both with and without www—DNS/CDN rules sometimes differ.)
+    B: (model) => `https://www.netlogoweb.org/embed#${model}`,
+  
+    // C) Alternate host (non-www); some deployments respond here
+    C: (model) => `https://netlogoweb.org/embed#${model}`,
+  };
+  
+  function setModelSrc(which) {
+    const maker = SRC_VARIANTS[which] || SRC_VARIANTS.A;
+    const src   = maker(MODEL_URL);
+    document.getElementById("nlw").src = src;
+  
+    // Reset readiness & handshake when we swap
+    nlwReady = false;
+    handshakeOnce = undefined;
+  
+    // Show how many child frames we currently detect (debug aid)
+    setTimeout(() => {
+      try {
+        const f = nlwFrame.contentWindow?.frames;
+        const count = f?.length ?? 0;
+        document.getElementById("frameCount").textContent =
+          ` (${count === 0 ? "no inner frames" : `${count} inner frame${count>1?"s":""}`})`;
+      } catch {
+        document.getElementById("frameCount").textContent = " (unknown frames)";
+      }
+    }, 600);
+  }
+  
+  // Wire the dropdown
+  document.addEventListener("DOMContentLoaded", () => {
+    const loaderSel = document.getElementById("loader");
+    if (loaderSel) {
+      loaderSel.addEventListener("change", () => setModelSrc(loaderSel.value));
+      // Set initial choice to B (embed)
+      setModelSrc(loaderSel.value || "B");
+    }
+  });
+
+
+
+    
   
   /******************************************************************
    * DOM
