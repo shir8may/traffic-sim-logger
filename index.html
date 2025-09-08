@@ -8,9 +8,9 @@
     :root{
       --box:#f9f9f9; --line:#ddd; --muted:#555; --ok:#0a7; --err:#b00;
     }
-    body { font-family: Arial, sans-serif; margin: 0; }
+    body { font-family: Arial, sans-serif; margin: 0; background:#fff; }
     h1 { margin: 12px; }
-    iframe { border: 1px solid #ccc; width: 100%; height: 640px; }
+    iframe { border: 1px solid #ccc; width: 100%; height: 640px; background:#111; }
     #controls {
       margin: 10px 12px; padding: 10px; background: var(--box);
       border: 1px solid var(--line); display: grid; gap: 8px;
@@ -27,16 +27,23 @@
     .links a { display:block; }
     .tiny { font-size: 12px; }
     .spacer { flex: 1 1 auto; }
+
+    /* advice banner */
+    .notice {
+      margin: 10px 12px; padding: 10px 12px; border-left: 4px solid var(--err);
+      background: #fff3f3; color: #700; font-size: 14px; line-height: 1.35;
+    }
+    .notice b { color: var(--err); }
+    .notice .muted { color:#555; }
+    .hidden { display:none; }
+    .notice code { background:#f3f3f3; padding:0 4px; border-radius:3px; }
   </style>
 </head>
 <body>
   <h1>Traffic Simulation Logger</h1>
 
-  <!-- NetLogo Web model in an iframe (swap this SRC later for HubNet Web teacher) -->
-  <iframe id="nlw"
-    src="https://www.netlogoweb.org/launch#https://shir8may.github.io/traffic-sim-logger/traffic-sim.nlogo"
-    referrerpolicy="no-referrer"
-  ></iframe>
+  <!-- The model iframe; src is set/updated by the Model Loader below -->
+  <iframe id="nlw" src="" referrerpolicy="no-referrer"></iframe>
 
   <div id="controls">
     <div class="row">
@@ -51,13 +58,13 @@
     <div class="row">
       <label class="muted">Model Loader:</label>
       <select id="loader">
-        <option value="A">A — Launch shell (current)</option>
+        <option value="A">A — Launch shell</option>
         <option value="B" selected>B — Embed player</option>
-        <option value="C">C — Minimal player</option>
+        <option value="C">C — Embed alt host</option>
       </select>
       <span id="frameCount" class="tiny muted"></span>
     </div>
-    
+
     <div class="row">
       <button id="btn-init">Download Init CSV</button>
       <button id="btn-run">Download Run CSV</button>
@@ -71,398 +78,370 @@
     </div>
   </div>
 
+  <!-- Advice banner (appears only if no trusted replies are detected) -->
+  <div id="advice" class="notice hidden"></div>
+
   <div id="output" class="muted">Wrapper page loaded. Waiting for the model…</div>
 
-  <script>
-  /***********************
-   * 🔧 SET THESE IF NEEDED
-   ***********************/
-  const APPS_SCRIPT_URL =
-    "https://script.google.com/macros/s/AKfycby8icKZjsdXeHmxIprEKsfjPq3rcWcVvDRt8Vib41DB1EbqBt5FpGqkeuSA5PGQvIZ9/exec";
-  
-  const ALLOWED_ORIGINS = new Set([
-    "https://www.netlogoweb.org",
-    "https://netlogoweb.org",
-    "https://shir8may.github.io",
-    window.location.origin
+<script>
+/***********************
+ * EDIT THESE IF NEEDED
+ ***********************/
+const APPS_SCRIPT_URL =
+  "https://script.google.com/macros/s/AKfycby8icKZjsdXeHmxIprEKsfjPq3rcWcVvDRt8Vib41DB1EbqBt5FpGqkeuSA5PGQvIZ9/exec";
+
+const MODEL_URL = "https://shir8may.github.io/traffic-sim-logger/traffic-sim.nlogo";
+
+const ALLOWED_ORIGINS = new Set([
+  "https://www.netlogoweb.org",
+  "https://netlogoweb.org",
+  "https://shir8may.github.io",
+  window.location.origin
+]);
+
+/******************************
+ * Model URLs + loader helper
+ ******************************/
+const SRC_VARIANTS = {
+  A: (model) => `https://www.netlogoweb.org/launch#${model}`,
+  B: (model) => `https://www.netlogoweb.org/embed#${model}`,
+  C: (model) => `https://netlogoweb.org/embed#${model}`,
+};
+
+/******************************************************************
+ * DOM helpers
+ ******************************************************************/
+const elMode   = document.getElementById("mode");
+const elOut    = document.getElementById("output");
+const elBase   = document.getElementById("filebase");
+const elDbg    = document.getElementById("debug");
+const loaderSel= document.getElementById("loader");
+const frameLbl = document.getElementById("frameCount");
+const adviceEl = document.getElementById("advice");
+const nlwFrame = document.getElementById("nlw");
+
+function ts() {
+  const d = new Date();
+  const pad = (n)=> String(n).padStart(2,"0");
+  return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
+function clearOutput() { elOut.textContent = ""; }
+function log(msg, css="muted") {
+  const div = document.createElement("div");
+  div.className = `logline ${css}`;
+  div.textContent = msg;
+  elOut.appendChild(div);
+}
+function logLinks(title, openUrl, dlUrl) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "links ok";
+  wrapper.innerHTML = `<div>${title}</div>
+    <a target="_blank" rel="noopener" href="${openUrl}">File (open)</a>
+    <a target="_blank" rel="noopener" href="${dlUrl}">File (download)</a>`;
+  elOut.appendChild(wrapper);
+}
+
+/******************************************************************
+ * Advice banner helpers
+ ******************************************************************/
+let sawTrustedReply = false;
+function showNoReplyAdvice(contextTag="") {
+  const src = document.getElementById("nlw").src;
+  adviceEl.innerHTML = `
+    <b>No replies received from the model frame</b> ${contextTag ? `<span class="muted">[${contextTag}]</span>` : ""}<br>
+    The <code>/launch#…</code> shell often doesn't forward <code>postMessage</code> for user-hosted models.
+    <br><br>
+    <b>Fix options:</b>
+    <ol style="margin:6px 0 0 18px">
+      <li><b>Use HubNet Web (Teacher)</b> — paste the teacher session URL into the iframe (works with this bridge).</li>
+      <li><b>Self-host player</b> — add a simple <code>player.html</code> and load <code>player.html#&lt;model-url&gt;</code>.</li>
+      <li><b>In-model POST</b> — upload CSV via NetLogo Web’s <code>web</code> extension directly to Apps Script.</li>
+    </ol>
+    <div class="muted" style="margin-top:6px">Current iframe src: <code>${src}</code></div>`;
+  adviceEl.classList.remove("hidden");
+}
+function hideNoReplyAdvice(){ adviceEl.classList.add("hidden"); }
+function scheduleNoReplyCheck(tag){
+  setTimeout(() => { if (!sawTrustedReply) showNoReplyAdvice(tag); }, 3500);
+}
+function updateFrameCountLabel() {
+  try {
+    const f = nlwFrame.contentWindow?.frames;
+    const count = f?.length ?? 0;
+    frameLbl.textContent = ` (${count === 0 ? "no inner frames" : `${count} inner frame${count>1?"s":""}`})`;
+  } catch { frameLbl.textContent = " (unknown frames)"; }
+}
+
+/******************************************************************
+ * CSV I/O
+ ******************************************************************/
+function downloadCSVLocally(filename, text) {
+  const blob = new Blob([text], { type: "text/csv" });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  URL.revokeObjectURL(url);
+  a.remove();
+}
+async function uploadCSVToDrive(filename, csvText) {
+  const url = `${APPS_SCRIPT_URL}?filename=${encodeURIComponent(filename)}`;
+  const resp = await fetch(url, {
+    method: "POST",
+    mode: "cors",
+    headers: { "Content-Type": "text/csv" },
+    body: csvText
+  });
+  const text = await resp.text();
+  if (!resp.ok) throw new Error(`Apps Script error: ${resp.status} ${text}`);
+  const openMatch = text.match(/File \(open\):\s*(\S+)/i);
+  const dlMatch   = text.match(/File \(download\):\s*(\S+)/i);
+  return { raw:text, openUrl: openMatch?.[1] || null, dlUrl: dlMatch?.[1] || null };
+}
+
+/******************************************************************
+ * NLW bridge (targets, trust, talk, handshake)
+ ******************************************************************/
+let req = 0;
+const pending = new Map();
+let nlwReady = false;
+
+function isChildOf(rootWin, maybeChild) {
+  if (!rootWin || !maybeChild) return false;
+  try {
+    if (rootWin === maybeChild) return true;
+    const f = rootWin.frames;
+    for (let i = 0; i < f.length; i++) {
+      if (isChildOf(f[i], maybeChild)) return true;
+    }
+  } catch {}
+  return false;
+}
+function isFromIframeSource(event) {
+  try {
+    return event.source === nlwFrame.contentWindow ||
+           isChildOf(nlwFrame.contentWindow, event.source);
+  } catch { return false; }
+}
+function isTrustedEvent(event) {
+  if (isFromIframeSource(event)) return true;
+  if (ALLOWED_ORIGINS.has(event.origin)) return true;
+  return false;
+}
+function dbgLog(tag, payload, extra = {}) {
+  if (!elDbg?.checked) return;
+  console.log(tag, payload, extra);
+}
+function getNlwTargets() {
+  const targets = new Set();
+  const push = (w) => { try { if (w && typeof w.postMessage === "function") targets.add(w); } catch {} };
+  push(nlwFrame.contentWindow); // outer
+  try {
+    const f = nlwFrame.contentWindow?.frames;
+    for (let i = 0; i < (f?.length || 0); i++) push(f[i]); // inner(s)
+  } catch {}
+  if (elDbg?.checked) console.log("NLW target frames detected:", targets.size);
+  return Array.from(targets);
+}
+function normalizeReply(data) {
+  if (typeof data !== "object" || data === null) return null;
+  const id = data.requestId ?? data.id ?? null;
+  const ready = data.type === "ready" || data.type === "nlw:ready" || data.type === "NLW_READY" || data.nlw === "ready" || false;
+  const ok = data.nlw === "ok" || data.type === "nlw:ok" || data.type === "NLW_OK" || data.ok === true || false;
+  let value = undefined;
+  if ("result" in data) value = data.result; else if ("value" in data) value = data.value;
+  const error = data.error || data.message || null;
+  if (!ok && !ready && !error && data.payload && typeof data.payload === "object") {
+    const inner = normalizeReply(data.payload); if (inner) return inner;
+  }
+  return { id, ok, value, error, ready };
+}
+window.addEventListener("message", (event) => {
+  if (!isTrustedEvent(event)) return;
+
+  // first trusted message we’ve seen
+  sawTrustedReply = true;
+  hideNoReplyAdvice();
+
+  dbgLog("EVT <<<", event.data, { origin:event.origin, sameSource:isFromIframeSource(event) });
+  const norm = normalizeReply(event.data);
+  if (!norm) return;
+  const { id, ok, value, error, ready } = norm;
+  if (ready) nlwReady = true;
+
+  if (id && pending.has(id)) {
+    const { resolve, reject, t } = pending.get(id);
+    clearTimeout(t); pending.delete(id);
+    return (ok || ready) ? resolve(value) : reject(new Error(error || "Unknown reply"));
+  }
+  if (!id && (ok || ready) && (value !== undefined || ready) && pending.size > 0) {
+    const oldestId = pending.keys().next().value;
+    const { resolve, t } = pending.get(oldestId);
+    clearTimeout(t); pending.delete(oldestId);
+    console.warn("EVT <<< FALLBACK matched (no id) -> resolving", oldestId);
+    return resolve(value);
+  }
+}, false);
+
+function talk(payloads, timeoutMs = 25000) {
+  return new Promise((resolve, reject) => {
+    const id = "r" + (++req);
+    const t = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error("Timed out waiting for NetLogo Web response."));
+    }, timeoutMs);
+    pending.set(id, { resolve, reject, t });
+
+    const sendOnce = () => {
+      const targets = getNlwTargets();
+      if (targets.length === 0) dbgLog("WARN no targets yet", {});
+      for (const msg of payloads) {
+        const outgoing = { ...msg, id, requestId: id };
+        for (const win of targets) {
+          dbgLog("SEND >>>", outgoing, { toFrames: targets.length });
+          try { win.postMessage(outgoing, "*"); } catch {}
+        }
+      }
+    };
+    sendOnce();
+    setTimeout(sendOnce, 200);
+    setTimeout(sendOnce, 750);
+  });
+}
+function wrapReporter(expr) {
+  const s = String(expr).trim();
+  if (!s) return "()";
+  if (s.startsWith("(") && s.endsWith(")")) return s;
+  if (/[ \t\n\r"'`]/.test(s)) return s; // already an expression
+  return `(${s})`;
+}
+let handshakeOnce;
+function ensureReady(timeoutMs = 14000) {
+  if (nlwReady) return Promise.resolve(true);
+  if (!handshakeOnce) {
+    handshakeOnce = (async () => {
+      const attempts = [
+        [{ action:"runresult", agent:"observer", code:"(1)" },
+         { type:"nlw:runresult", agent:"observer", code:"(1)" },
+         { type:"NLW_RUNRESULT", agent:"observer", code:"(1)" }],
+        [{ action:"run", agent:"observer", code:"print 1" },
+         { type:"nlw:run", agent:"observer", code:"print 1" },
+         { type:"NLW_RUN", agent:"observer", code:"print 1" }],
+        [{ type:"hello" }, { type:"nlw:hello" }, { type:"NLW_HELLO" }],
+        [{ type:"ready" }, { type:"nlw:ready" }, { type:"NLW_READY" }],
+        [{ type:"register" }, { type:"nlw:register" }, { type:"NLW_REGISTER" }]
+      ];
+      for (let i=0;i<attempts.length;i++){
+        try { await talk(attempts[i], 3000); nlwReady = true; return true; }
+        catch { await new Promise(r=>setTimeout(r,250)); }
+      }
+      throw new Error("Handshake with NetLogo Web failed.");
+    })();
+  }
+  return Promise.race([
+    handshakeOnce,
+    new Promise((_,rej)=>setTimeout(()=>rej(new Error("Handshake timed out.")), timeoutMs))
   ]);
-    
-  /******************************
-   * Model URLs + loader helper
-   ******************************/
-  const MODEL_URL = "https://shir8may.github.io/traffic-sim-logger/traffic-sim.nlogo";
-  
-  // Candidate iframe srcs we’ll try (same model), pick the one that returns messages
-  const SRC_VARIANTS = {
-    // A) Original “launch” wrapper (often nests an inner iframe → can break postMessage)
-    A: (model) => `https://www.netlogoweb.org/launch#${model}`,
-  
-    // B) Embed/standalone player (preferred; usually a single responsive player frame)
-    // (Both with and without www—DNS/CDN rules sometimes differ.)
-    B: (model) => `https://www.netlogoweb.org/embed#${model}`,
-  
-    // C) Alternate host (non-www); some deployments respond here
-    C: (model) => `https://netlogoweb.org/embed#${model}`,
-  };
-  
-  function setModelSrc(which) {
-    const maker = SRC_VARIANTS[which] || SRC_VARIANTS.A;
-    const src   = maker(MODEL_URL);
-    document.getElementById("nlw").src = src;
-  
-    // Reset readiness & handshake when we swap
-    nlwReady = false;
-    handshakeOnce = undefined;
-  
-    // Show how many child frames we currently detect (debug aid)
-    setTimeout(() => {
-      try {
-        const f = nlwFrame.contentWindow?.frames;
-        const count = f?.length ?? 0;
-        document.getElementById("frameCount").textContent =
-          ` (${count === 0 ? "no inner frames" : `${count} inner frame${count>1?"s":""}`})`;
-      } catch {
-        document.getElementById("frameCount").textContent = " (unknown frames)";
-      }
-    }, 600);
-  }
-  
-  // Wire the dropdown
-  document.addEventListener("DOMContentLoaded", () => {
-    const loaderSel = document.getElementById("loader");
-    if (loaderSel) {
-      loaderSel.addEventListener("change", () => setModelSrc(loaderSel.value));
-      // Set initial choice to B (embed)
-      setModelSrc(loaderSel.value || "B");
-    }
-  });
+}
+async function nlwRunReporter(expr) {
+  await ensureReady().catch(()=>{});
+  const code = wrapReporter(expr);
+  return talk([
+    { action:"runresult", agent:"observer", code },
+    { type:"nlw:runresult", agent:"observer", code },
+    { type:"NLW_RUNRESULT", agent:"observer", code },
+    { action:"runresult", code },
+    { type:"nlw:runresult", code }
+  ]);
+}
+async function nlwRunCommand(code) {
+  await ensureReady().catch(()=>{});
+  return talk([
+    { action:"run", agent:"observer", code },
+    { type:"nlw:run", agent:"observer", code },
+    { type:"NLW_RUN", agent:"observer", code },
+    { action:"run", code },
+    { type:"nlw:run", code }
+  ]);
+}
 
+/******************************************************************
+ * Model loader + lifecycle + CSV actions
+ ******************************************************************/
+function setModelSrc(which) {
+  const maker = SRC_VARIANTS[which] || SRC_VARIANTS.A;
+  const src   = maker(MODEL_URL);
+  document.getElementById("nlw").src = src;
 
+  // Reset readiness / advice state
+  nlwReady = false;
+  handshakeOnce = undefined;
+  sawTrustedReply = false;
+  hideNoReplyAdvice();
 
-    
-  
-  /******************************************************************
-   * DOM
-   ******************************************************************/
-  const elMode   = document.getElementById("mode");
-  const elOut    = document.getElementById("output");
-  const elBase   = document.getElementById("filebase");
-  const elDbg    = document.getElementById("debug");
-  const nlwFrame = document.getElementById("nlw");
-  
-  // Optional extra logger toggle (you can add a checkbox with id="logAll" next to Debug if you want)
-  let LOG_ALL = false; // set true temporarily to capture ALL postMessages (unsafe/noisy)
-  
-  function ts() {
-    const d = new Date();
-    const pad = (n)=> String(n).padStart(2,"0");
-    return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
-  }
-  function clearOutput() { elOut.textContent = ""; }
-  function log(msg, css="muted") {
-    const div = document.createElement("div");
-    div.className = `logline ${css}`;
-    div.textContent = msg;
-    elOut.appendChild(div);
-  }
-  function logLinks(title, openUrl, dlUrl) {
-    const wrapper = document.createElement("div");
-    wrapper.className = "links ok";
-    wrapper.innerHTML = `<div>${title}</div>
-      <a target="_blank" rel="noopener" href="${openUrl}">File (open)</a>
-      <a target="_blank" rel="noopener" href="${dlUrl}">File (download)</a>`;
-    elOut.appendChild(wrapper);
-  }
-  function downloadCSVLocally(filename, text) {
-    const blob = new Blob([text], { type: "text/csv" });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement("a");
-    a.href = url; a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    URL.revokeObjectURL(url);
-    a.remove();
-  }
-  async function uploadCSVToDrive(filename, csvText) {
-    const url = `${APPS_SCRIPT_URL}?filename=${encodeURIComponent(filename)}`;
-    const resp = await fetch(url, {
-      method: "POST",
-      mode: "cors",
-      headers: { "Content-Type": "text/csv" },
-      body: csvText
-    });
-    const text = await resp.text();
-    if (!resp.ok) throw new Error(`Apps Script error: ${resp.status} ${text}`);
-    const openMatch = text.match(/File \(open\):\s*(\S+)/i);
-    const dlMatch   = text.match(/File \(download\):\s*(\S+)/i);
-    return { raw:text, openUrl: openMatch?.[1] || null, dlUrl: dlMatch?.[1] || null };
-  }
-  
-  /******************************************************************
-   * NLW bridge
-   ******************************************************************/
-  let req = 0;
-  const pending = new Map();
-  let nlwReady = false;
-  
-  function isChildOf(rootWin, maybeChild) {
-    if (!rootWin || !maybeChild) return false;
-    try {
-      if (rootWin === maybeChild) return true;
-      const f = rootWin.frames;
-      for (let i = 0; i < f.length; i++) {
-        if (isChildOf(f[i], maybeChild)) return true;
-      }
-    } catch {}
-    return false;
-  }
-  function isFromIframeSource(event) {
-    try {
-      return event.source === nlwFrame.contentWindow ||
-             isChildOf(nlwFrame.contentWindow, event.source);
-    } catch { return false; }
-  }
-  function isTrustedEvent(event) {
-    if (isFromIframeSource(event)) return true;
-    if (ALLOWED_ORIGINS.has(event.origin)) return true;
-    return false;
-  }
-  function dbgLog(tag, payload, extra = {}) {
-    if (!elDbg?.checked) return;
-    console.log(tag, payload, extra);
-  }
-  
-  function getNlwTargets() {
-    const targets = new Set();
-    const push = (w) => { try { if (w && typeof w.postMessage === "function") targets.add(w); } catch {} };
-  
-    push(nlwFrame.contentWindow); // outer launch
-    try {
-      const f = nlwFrame.contentWindow?.frames;
-      for (let i = 0; i < (f?.length || 0); i++) push(f[i]); // inner(s)
-    } catch {}
-  
-    // Status line to help us see how many frames we found
-    if (elDbg?.checked) {
-      const count = Array.from(targets).length;
-      console.log("NLW target frames detected:", count);
-    }
-    return Array.from(targets);
-  }
-  
-  /******************************************************************
-   * Receiver + normalization
-   ******************************************************************/
-  function normalizeReply(data) {
-    if (typeof data !== "object" || data === null) return null;
-  
-    const id = data.requestId ?? data.id ?? null;
-  
-    const ready =
-      data.type === "ready" || data.type === "nlw:ready" || data.type === "NLW_READY" ||
-      data.nlw  === "ready" || false;
-  
-    const ok =
-      data.nlw === "ok" || data.type === "nlw:ok" || data.type === "NLW_OK" ||
-      data.ok === true || false;
-  
-    let value = undefined;
-    if ("result" in data) value = data.result;
-    else if ("value" in data) value = data.value;
-  
-    const error = data.error || data.message || null;
-  
-    if (!ok && !ready && !error && data.payload && typeof data.payload === "object") {
-      const inner = normalizeReply(data.payload);
-      if (inner) return inner;
-    }
-    return { id, ok, value, error, ready };
-  }
-  
-  // STRICT handler (used always)
-  window.addEventListener("message", (event) => {
-    if (!isTrustedEvent(event)) return;
-  
-    dbgLog("EVT <<<", event.data, { origin:event.origin, sameSource:isFromIframeSource(event) });
-  
-    const norm = normalizeReply(event.data);
-    if (!norm) return;
-  
-    const { id, ok, value, error, ready } = norm;
-    if (ready) nlwReady = true;
-  
-    if (id && pending.has(id)) {
-      const { resolve, reject, t } = pending.get(id);
-      clearTimeout(t); pending.delete(id);
-      return (ok || ready) ? resolve(value) : reject(new Error(error || "Unknown reply"));
-    }
-    if (!id && (ok || ready) && (value !== undefined || ready) && pending.size > 0) {
-      const oldestId = pending.keys().next().value;
-      const { resolve, t } = pending.get(oldestId);
-      clearTimeout(t); pending.delete(oldestId);
-      console.warn("EVT <<< FALLBACK matched (no id) -> resolving", oldestId);
-      return resolve(value);
-    }
-  }, false);
-  
-  // UNSAFE logger (optional) — set LOG_ALL = true to see every message
-  window.addEventListener("message", (event) => {
-    if (!LOG_ALL) return;
-    console.log("EVT(all) <<<", { origin: event.origin, data: event.data, sameSource: isFromIframeSource(event) });
-  }, false);
-  
-  /******************************************************************
-   * talk(): post to ALL candidate frames (outer + inner), with retries
-   ******************************************************************/
-  function talk(payloads, timeoutMs = 25000) {
-    return new Promise((resolve, reject) => {
-      const id = "r" + (++req);
-      const t = setTimeout(() => {
-        pending.delete(id);
-        reject(new Error("Timed out waiting for NetLogo Web response."));
-      }, timeoutMs);
-      pending.set(id, { resolve, reject, t });
-  
-      const sendOnce = () => {
-        const targets = getNlwTargets();
-        if (targets.length === 0) dbgLog("WARN no targets yet", {});
-        for (const msg of payloads) {
-          const outgoing = { ...msg, id, requestId: id };
-          for (const win of targets) {
-            dbgLog("SEND >>>", outgoing, { toFrames: targets.length });
-            try { win.postMessage(outgoing, "*"); } catch {}
-          }
-        }
-      };
-  
-      sendOnce();
-      setTimeout(sendOnce, 200);
-      setTimeout(sendOnce, 750);
-    });
-  }
-  
-  /******************************************************************
-   * Handshake + NLW helpers
-   ******************************************************************/
-  function wrapReporter(expr) {
-    const s = String(expr).trim();
-    if (!s) return "()";
-    if (s.startsWith("(") && s.endsWith(")")) return s;
-    if (/[ \t\n\r"'`]/.test(s)) return s;
-    return `(${s})`;
-  }
-  
-  // Try a wider handshake: results, commands, and legacy hello/ready/register
-  let handshakeOnce;
-  function ensureReady(timeoutMs = 14000) {
-    if (nlwReady) return Promise.resolve(true);
-    if (!handshakeOnce) {
-      handshakeOnce = (async () => {
-        const attempts = [
-          // common runresult
-          [{ action:"runresult", agent:"observer", code:"(1)" },
-           { type:"nlw:runresult", agent:"observer", code:"(1)" },
-           { type:"NLW_RUNRESULT", agent:"observer", code:"(1)" }],
-          // command variants
-          [{ action:"run", agent:"observer", code:"print 1" },
-           { type:"nlw:run", agent:"observer", code:"print 1" },
-           { type:"NLW_RUN", agent:"observer", code:"print 1" }],
-          // legacy-ish pings
-          [{ type:"hello" }, { type:"nlw:hello" }, { type:"NLW_HELLO" }],
-          [{ type:"ready" }, { type:"nlw:ready" }, { type:"NLW_READY" }],
-          [{ type:"register" }, { type:"nlw:register" }, { type:"NLW_REGISTER" }]
-        ];
-        for (let i=0;i<attempts.length;i++){
-          try { await talk(attempts[i], 3000); nlwReady = true; return true; }
-          catch { await new Promise(r=>setTimeout(r,250)); }
-        }
-        throw new Error("Handshake with NetLogo Web failed.");
-      })();
-    }
-    return Promise.race([
-      handshakeOnce,
-      new Promise((_,rej)=>setTimeout(()=>rej(new Error("Handshake timed out.")), timeoutMs))
-    ]);
-  }
-  
-  async function nlwRunReporter(expr) {
-    await ensureReady().catch(()=>{});
-    const code = wrapReporter(expr);
-    return talk([
-      { action:"runresult", agent:"observer", code },
-      { type:"nlw:runresult", agent:"observer", code },
-      { type:"NLW_RUNRESULT", agent:"observer", code },
-      { action:"runresult", code },
-      { type:"nlw:runresult", code }
-    ]);
-  }
-  async function nlwRunCommand(code) {
-    await ensureReady().catch(()=>{});
-    return talk([
-      { action:"run", agent:"observer", code },
-      { type:"nlw:run", agent:"observer", code },
-      { type:"NLW_RUN", agent:"observer", code },
-      { action:"run", code },
-      { type:"nlw:run", code }
-    ]);
-  }
-  
-  /******************************************************************
-   * Page lifecycle + CSV workflow
-   ******************************************************************/
-  nlwFrame.addEventListener("load", () => {
-    clearOutput();
-    nlwReady = false;
-    handshakeOnce = undefined;
-    log("Model iframe loaded. You can use the buttons now.", "ok");
-  });
-  
-  async function handleCSV(kind) {
-    clearOutput();
-    log(`Requesting ${kind.toUpperCase()} CSV from model…`);
-    try {
-      const reporter = (kind === "init") ? "csv-init-text" : "csv-run-text";
-      const csv = await nlwRunReporter(reporter);
-  
-      if (!csv || !String(csv).trim()) {
-        log(`The ${kind} CSV is empty — nothing to ${elMode.value === "drive" ? "upload" : "download"}.`, "err");
-        return;
-      }
-  
-      const base = (elBase.value || "logger").trim();
-      const name = (kind === "init")
-        ? `${base}_world_init_data_${ts()}.csv`
-        : `${base}_run_${ts()}.csv`;
-  
-      if (elMode.value === "drive") {
-        log("Uploading to Google Drive (Apps Script)…");
-        const { openUrl, dlUrl, raw } = await uploadCSVToDrive(name, csv);
-        log(`SAVED: ${name}`, "ok");
-        if (openUrl || dlUrl) {
-          logLinks("Links returned by Apps Script:", openUrl || "#", dlUrl || "#");
-        } else {
-          log(raw, "muted");
-        }
-      } else {
-        downloadCSVLocally(name, csv);
-        log(`Downloaded ${name} locally.`, "ok");
-      }
-  
-      if (kind === "run") {
-        log("Clearing run buffer in the model…");
-        await nlwRunCommand("clear-csv-run");
-        log("Run buffer cleared.", "ok");
-      }
-    } catch (e) {
-      log(`Error: ${e.message}`, "err");
-    }
-  }
-  
-  // Wire buttons
-  document.getElementById("btn-init").addEventListener("click", () => handleCSV("init"));
-  document.getElementById("btn-run").addEventListener("click", () => handleCSV("run"));
-  </script>
-  
+  setTimeout(updateFrameCountLabel, 600);
+}
 
+document.addEventListener("DOMContentLoaded", () => {
+  // Initialize loader: default B (Embed). If Not Found, switch to A.
+  setModelSrc(loaderSel.value || "B");
+  loaderSel.addEventListener("change", () => setModelSrc(loaderSel.value));
+});
+
+nlwFrame.addEventListener("load", () => {
+  clearOutput();
+  nlwReady = false;
+  handshakeOnce = undefined;
+  sawTrustedReply = false;
+  hideNoReplyAdvice();
+  updateFrameCountLabel();
+  log("Model iframe loaded. You can use the buttons now.", "ok");
+});
+
+async function handleCSV(kind) {
+  clearOutput();
+  log(`Requesting ${kind.toUpperCase()} CSV from model…`);
+  scheduleNoReplyCheck(kind.toUpperCase());
+
+  try {
+    const reporter = (kind === "init") ? "csv-init-text" : "csv-run-text";
+    const csv = await nlwRunReporter(reporter);
+
+    if (!csv || !String(csv).trim()) {
+      log(`The ${kind} CSV is empty — nothing to ${elMode.value === "drive" ? "upload" : "download"}.`, "err");
+      return;
+    }
+
+    const base = (elBase.value || "logger").trim();
+    const name = (kind === "init")
+      ? `${base}_world_init_data_${ts()}.csv`
+      : `${base}_run_${ts()}.csv`;
+
+    if (elMode.value === "drive") {
+      log("Uploading to Google Drive (Apps Script)…");
+      const { openUrl, dlUrl, raw } = await uploadCSVToDrive(name, csv);
+      log(`SAVED: ${name}`, "ok");
+      if (openUrl || dlUrl) logLinks("Links returned by Apps Script:", openUrl || "#", dlUrl || "#");
+      else log(raw, "muted");
+    } else {
+      downloadCSVLocally(name, csv);
+      log(`Downloaded ${name} locally.`, "ok");
+    }
+
+    if (kind === "run") {
+      log("Clearing run buffer in the model…");
+      await nlwRunCommand("clear-csv-run");
+      log("Run buffer cleared.", "ok");
+    }
+  } catch (e) {
+    log(`Error: ${e.message}`, "err");
+  }
+}
+
+// Buttons
+document.getElementById("btn-init").addEventListener("click", () => handleCSV("init"));
+document.getElementById("btn-run").addEventListener("click", () => handleCSV("run"));
+</script>
 </body>
 </html>
