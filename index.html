@@ -67,55 +67,51 @@
    ***********************/
   const APPS_SCRIPT_URL =
     "https://script.google.com/macros/s/AKfycby8icKZjsdXeHmxIprEKsfjPq3rcWcVvDRt8Vib41DB1EbqBt5FpGqkeuSA5PGQvIZ9/exec";
-  // ↑ Replace if you redeploy. Leave as-is to use the URL you sent me.
-
+  
   /******************************************************************
-   * NetLogo(Web/HubNet Web) messaging — robust version
-   * - Accepts multiple message shapes and both www/non-www origins
-   * - Handshakes before first call
-   * - Longer timeout
+   * DIAGNOSTIC BRIDGE (no origin filters)
    ******************************************************************/
-  // --- DIAGNOSTIC BRIDGE (no filters) ---
   const nlwFrame = document.getElementById("nlw");
   
   let req = 0;
   const pending = new Map();
   
   window.addEventListener("message", (event) => {
-    // DIAG: show EVERYTHING we get
+    // DIAG: log every message we see
     console.log("EVT <<<", { origin: event.origin, data: event.data, sameSource: event.source === nlwFrame.contentWindow });
-
   
-    const d = event.data || {};
+    const d  = event.data || {};
     const id = d.requestId ?? d.id;
+  
     const isOk =
       d.nlw === "ok" ||
       d.type === "nlw:ok" ||
       d.type === "NLW_OK" ||
       d.ok === true;
-
+  
     const val = (d.result !== undefined) ? d.result
               : (d.value  !== undefined) ? d.value
               : undefined;
-      
+  
     const errMsg = d.error || d.message;
   
-    if (!id || !pending.has(id)) {
-    const { resolve, reject, t } = pending.get(id);
-    clearTimeout(t); pending.delete(id);
-    isOk ? resolve(val) : reject(new Error(errMsg || "Unknown reply"));
-  }
-  // Case B (fallback): OK reply with a value but no id — resolve the oldest pending
-  if (!id && isOk && val !== undefined && pending.size > 0) {
-    const oldestId = pending.keys().next().value; // first inserted key
-    const { resolve, t } = pending.get(oldestId);
-    clearTimeout(t); pending.delete(oldestId);
-    console.warn("EVT <<< matched by FALLBACK (no id) -> resolving", oldestId);
-    return resolve(val);
-  }
-
-  // Otherwise ignore
-}, false);
+    // Case A: normal reply with a matching id
+    if (id && pending.has(id)) {
+      const { resolve, reject, t } = pending.get(id);
+      clearTimeout(t); pending.delete(id);
+      return isOk ? resolve(val) : reject(new Error(errMsg || "Unknown reply"));
+    }
+  
+    // Case B: OK reply with value but no id → resolve oldest pending (fallback)
+    if (!id && isOk && val !== undefined && pending.size > 0) {
+      const oldestId = pending.keys().next().value;
+      const { resolve, t } = pending.get(oldestId);
+      clearTimeout(t); pending.delete(oldestId);
+      console.warn("EVT <<< FALLBACK matched (no id) -> resolving", oldestId);
+      return resolve(val);
+    }
+    // otherwise ignore
+  }, false);
   
   function talk(payloads, timeoutMs = 25000) {
     return new Promise((resolve, reject) => {
@@ -128,8 +124,8 @@
   
       const send = (msg) => {
         const outgoing = { ...msg, id, requestId: id };
-        console.log("SEND >>>", outgoing);                    // DIAG: log sent
-        nlwFrame.contentWindow.postMessage(outgoing, "*");    // no origin filter
+        console.log("SEND >>>", outgoing); // DIAG
+        nlwFrame.contentWindow.postMessage(outgoing, "*");
       };
       payloads.forEach(send);
     });
@@ -137,46 +133,42 @@
   
   async function nlwRunReporter(code) {
     return talk([
-      { action:"runresult", agent:"observer", code },
-      { type:"nlw:runresult", agent:"observer", code },
-      { type:"NLW_RUNRESULT", agent:"observer", code },
-      { action:"runresult", code },
-      { type:"nlw:runresult", code }
+      { action: "runresult",  agent: "observer", code },
+      { type:   "nlw:runresult", agent: "observer", code },
+      { type:   "NLW_RUNRESULT",  agent: "observer", code },
+      { action: "runresult",  code },
+      { type:   "nlw:runresult",  code }
     ]);
   }
   async function nlwRunCommand(code) {
     return talk([
-      { action:"run", agent:"observer", code },
-      { type:"nlw:run", agent:"observer", code },
-      { type:"NLW_RUN", agent:"observer", code },
-      { action:"run", code },
-      { type:"nlw:run", code }
+      { action: "run",  agent: "observer", code },
+      { type:   "nlw:run", agent: "observer", code },
+      { type:   "NLW_RUN",  agent: "observer", code },
+      { action: "run",  code },
+      { type:   "nlw:run",  code }
     ]);
   }
-
-
-  // Friendly notice when the iframe is ready (+kick handshake)
+  
+  // Just a friendly load message (no handshake calls)
   nlwFrame.addEventListener("load", () => {
     clearOutput();
     log("Model iframe loaded. You can use the buttons now.", "ok");
-    bridgeReady = false;
-    setTimeout(() => ensureBridge().catch(() => {}), 500);
-    try { nlwFrame.contentWindow.postMessage({ hello: "wrapper-ready" }, "*"); } catch {}
   });
-
+  
   /******************************************************************
    * CSV + Drive/local glue (unchanged)
    ******************************************************************/
   const elMode = document.getElementById("mode");
   const elOut  = document.getElementById("output");
   const elBase = document.getElementById("filebase");
-
+  
   function ts() {
     const d = new Date();
     const pad = (n)=> String(n).padStart(2,"0");
     return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
   }
-
+  
   function log(msg, css="muted") {
     const div = document.createElement("div");
     div.className = `logline ${css}`;
@@ -191,11 +183,8 @@
       <a target="_blank" rel="noopener" href="${dlUrl}">File (download)</a>`;
     elOut.appendChild(wrapper);
   }
-  function clearOutput() {
-    elOut.textContent = "";
-  }
-
-  // Local download
+  function clearOutput() { elOut.textContent = ""; }
+  
   function downloadCSVLocally(filename, text) {
     const blob = new Blob([text], { type: "text/csv" });
     const url  = URL.createObjectURL(blob);
@@ -206,8 +195,7 @@
     URL.revokeObjectURL(url);
     a.remove();
   }
-
-  // Upload to Apps Script
+  
   async function uploadCSVToDrive(filename, csvText) {
     const url = `${APPS_SCRIPT_URL}?filename=${encodeURIComponent(filename)}`;
     const resp = await fetch(url, {
@@ -220,16 +208,10 @@
     if (!resp.ok) throw new Error(`Apps Script error: ${resp.status} ${text}`);
     const openMatch = text.match(/File \(open\):\s*(\S+)/i);
     const dlMatch   = text.match(/File \(download\):\s*(\S+)/i);
-    return {
-      raw: text,
-      openUrl: openMatch ? openMatch[1] : null,
-      dlUrl:   dlMatch ? dlMatch[1]   : null
-    };
+    return { raw:text, openUrl: openMatch?.[1] || null, dlUrl: dlMatch?.[1] || null };
   }
-
-  // Core actions: get reporter, then upload/download
+  
   async function handleCSV(kind) {
-    // kind: "init" | "run"
     clearOutput();
     log(`Requesting ${kind.toUpperCase()} CSV from model…`);
     try {
@@ -239,19 +221,15 @@
         log(`The ${kind} CSV is empty — nothing to ${elMode.value === "drive" ? "upload" : "download"}.`, "err");
         return;
       }
-
       const base = (elBase.value || "logger").trim();
-      const name = (kind === "init")
-        ? `${base}_world_init_data_${ts()}.csv`
-        : `${base}_run_${ts()}.csv`;
-
+      const name = (kind === "init") ? `${base}_world_init_data_${ts()}.csv` : `${base}_run_${ts()}.csv`;
+  
       if (elMode.value === "drive") {
         log("Uploading to Google Drive (Apps Script)…");
         const { openUrl, dlUrl, raw } = await uploadCSVToDrive(name, csv);
         log(`SAVED: ${name}`, "ok");
         if (openUrl || dlUrl) logLinks("Links returned by Apps Script:", openUrl || "#", dlUrl || "#");
         else log(raw, "muted");
-
         if (kind === "run") {
           log("Clearing run buffer in the model…");
           await nlwRunCommand("clear-csv-run");
@@ -270,10 +248,10 @@
       log(`Error: ${e.message}`, "err");
     }
   }
-
+  
   // Wire buttons
   document.getElementById("btn-init").addEventListener("click", () => handleCSV("init"));
   document.getElementById("btn-run").addEventListener("click", () => handleCSV("run"));
- </script>
+  </script>
 </body>
 </html>
